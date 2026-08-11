@@ -72,7 +72,7 @@ defmodule Tidewake.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:oban, "~> 2.23"},
-      {:req, "~> 0.6.3"},
+      {:req, "~> 0.7.2"},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false}
     ]
