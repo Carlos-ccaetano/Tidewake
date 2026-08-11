@@ -30,6 +30,8 @@ Tidewake will eventually:
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
+See the planned [endpoint management API contract](docs/api/endpoints.md) for the initial endpoint representation and operations.
+
 ## Stack
 
 - Elixir 1.19 and Erlang/OTP 28
