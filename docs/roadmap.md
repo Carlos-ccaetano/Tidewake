@@ -4,7 +4,7 @@ The roadmap is incremental. Each milestone should leave the application usable, 
 
 ## Milestone 0: foundation
 
-Status: current
+Status: complete
 
 - Phoenix application with LiveView and Ecto
 - PostgreSQL local environment
@@ -35,11 +35,19 @@ This milestone should avoid real external delivery until state transitions are t
 
 ## Milestone 2: endpoints and signed delivery
 
-- register and disable endpoints;
+Status: in progress
+
+Completed:
+
+- endpoint model and persistence, including schema validation and context operations.
+
+Planned:
+
+- add the HTTP management API to register and disable endpoints;
 - associate endpoints with projects;
 - deliver with Req using explicit timeouts;
 - sign exact request bytes with versioned HMAC headers;
-- record safe response metadata;
+- record delivery attempts and safe response metadata;
 - test signatures and transport classification.
 
 ## Milestone 3: retry and idempotency hardening
