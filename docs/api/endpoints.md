@@ -2,7 +2,9 @@
 
 ## Status
 
-This contract is planned and has not been implemented. It describes the initial API shape for endpoint management without claiming that persistence, routes, controllers, or webhook delivery exist.
+Endpoint persistence is implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema exist, and the `Tidewake.Webhooks` context provides operations to list, retrieve, create, update, and change endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
+
+The HTTP API remains planned: routes and controllers have not been implemented. Webhook delivery has not been implemented.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -216,7 +218,6 @@ Error responses must not expose database details or stack traces.
 
 This documentation task does not implement:
 
-- endpoint persistence;
 - API routes or controllers;
 - authentication or authorization;
 - webhook delivery;
