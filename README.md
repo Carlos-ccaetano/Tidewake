@@ -2,7 +2,7 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is currently a foundation only. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Event ingestion, endpoint management, webhook delivery, retries, idempotency, HMAC signing, audit records, and the operational LiveView are planned and are not implemented yet.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint persistence is implemented through the `Tidewake.Webhooks.Endpoint` schema and the `Tidewake.Webhooks` context. The endpoint management HTTP API, event ingestion, webhook delivery, retries, idempotency, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
 
 ## Relationship with Ironhold
 
@@ -124,13 +124,13 @@ The generated mix precommit alias runs the same checks and also rejects unused l
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Future responsibilities may grow into focused contexts such as Tidewake.Projects, Tidewake.Webhooks, Tidewake.Security, Tidewake.Observability, and Tidewake.Workers. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint persistence lives in `Tidewake.Webhooks`. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, and a recorded attempt.
-3. Endpoint management, signed delivery, retries, and idempotency.
+3. Endpoint management HTTP API, signed delivery, retries, and idempotency.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 
