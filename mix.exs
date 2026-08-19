@@ -74,7 +74,7 @@ defmodule Tidewake.MixProject do
       {:oban, "~> 2.23"},
       {:req, "~> 0.7.2"},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false}
+      {:sobelow, "~> 0.15.0", only: [:dev, :test], runtime: false}
     ]
   end
 
