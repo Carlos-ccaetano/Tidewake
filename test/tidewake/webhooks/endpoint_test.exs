@@ -24,6 +24,30 @@ defmodule Tidewake.Webhooks.EndpointTest do
       assert get_field(changeset, :active)
     end
 
+    test "accepts active false without applying the default" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: "Ironhold",
+          url: "https://ironhold.example.com/api/webhooks",
+          active: false
+        })
+
+      assert changeset.valid?
+      refute get_field(changeset, :active)
+    end
+
+    test "rejects an invalid active value and exposes the field error" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: "Ironhold",
+          url: "https://ironhold.example.com/api/webhooks",
+          active: "not-a-boolean"
+        })
+
+      refute changeset.valid?
+      assert "is invalid" in errors_on(changeset).active
+    end
+
     test "requires a name" do
       changeset =
         Endpoint.changeset(%Endpoint{}, %{url: "https://ironhold.example.com/api/webhooks"})
