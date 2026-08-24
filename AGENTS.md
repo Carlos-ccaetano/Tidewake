@@ -8,7 +8,7 @@ This is a web application written using the Phoenix web framework.
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content
-- The `MyAppWeb.Layouts` module is aliased in the `my_app_web.ex` file, so you can use it without needing to alias it again
+- The `TidewakeWeb.Layouts` module is aliased in `lib/tidewake_web.ex`, so you can use it without needing to alias it again
 - Anytime you run into errors with no `current_scope` assign:
   - You failed to follow the Authenticated Routes guidelines, or you failed to pass `current_scope` to `<Layouts.app>`
   - **Always** fix the `current_scope` error by moving your routes to the proper `live_session` and ensure you pass `current_scope` as needed
@@ -20,17 +20,22 @@ custom classes must fully style the input
 
 ### JS and CSS guidelines
 
-- **Use Tailwind CSS classes and custom CSS rules** to create polished, responsive, and visually stunning interfaces.
-- Tailwindcss v4 **no longer needs a tailwind.config.js** and uses a new import syntax in `app.css`:
+- **Use Tailwind CSS classes and custom CSS rules** to build clear, responsive, and accessible interfaces consistent with Tidewake's existing visual language.
+- Tailwind CSS v4 **does not need a tailwind.config.js**. Tidewake uses these imports and sources in `assets/css/app.css`:
 
       @import "tailwindcss" source(none);
+      @import "phoenix-colocated/tidewake/colocated.css";
       @source "../css";
       @source "../js";
-      @source "../../lib/my_app_web";
+      @source "../../lib/tidewake_web";
+      @source "../../_build/dev/phoenix-colocated/tidewake/*/";
 
-- **Always use and maintain this import syntax** in the app.css file for projects generated with `phx.new`
+- **Maintain these project-specific Tailwind imports and sources** in `assets/css/app.css`
 - **Never** use `@apply` when writing raw css
-- **Always** manually write your own tailwind-based components instead of using daisyUI for a unique, world-class design
+- Prefer the existing components imported from `TidewakeWeb.CoreComponents` before creating new UI abstractions
+- Use Tailwind utilities for simple, project-specific styling
+- DaisyUI is already installed and configured in Tidewake. You may use its components when they reduce duplication and remain consistent with the current visual language
+- Do not add another component library without a concrete need that the existing Phoenix components, Tailwind, and DaisyUI cannot address
 - Out of the box **only the app.js and app.css bundles are supported**
   - You cannot reference an external vendor'd script `src` or link `href` in the layouts
   - You must import the vendor deps into app.js and app.css to use them
@@ -38,10 +43,11 @@ custom classes must fully style the input
 
 ### UI/UX & design guidelines
 
-- **Produce world-class UI designs** with a focus on usability, aesthetics, and modern design principles
-- Implement **subtle micro-interactions** (e.g., button hover effects, and smooth transitions)
-- Ensure **clean typography, spacing, and layout balance** for a refined, premium look
-- Focus on **delightful details** like hover effects, loading states, and smooth page transitions
+- Prioritize clarity, responsive behavior, accessibility, and consistency with the existing interface
+- Keep interactive controls keyboard-accessible, clearly labeled, and visibly focused, with sufficient color contrast
+- Keep typography, spacing, and layout patterns consistent across screens
+- Add transitions or micro-interactions only when they communicate state, and respect reduced-motion preferences
+- Provide clear loading, empty, and error states where relevant
 
 
 <!-- usage-rules-start -->
@@ -140,7 +146,7 @@ custom classes must fully style the input
 - **Always** use the imported `Phoenix.Component.form/1` and `Phoenix.Component.inputs_for/1` function to build forms. **Never** use `Phoenix.HTML.form_for` or `Phoenix.HTML.inputs_for` as they are outdated
 - When building forms **always** use the already imported `Phoenix.Component.to_form/2` (`assign(socket, form: to_form(...))` and `<.form for={@form} id="msg-form">`), then access those forms in the template via `@form[:field]`
 - **Always** add unique DOM IDs to key elements (like forms, buttons, etc) when writing templates, these IDs can later be used in tests (`<.form for={@form} id="product-form">`)
-- For "app wide" template imports, you can import/alias into the `my_app_web.ex`'s `html_helpers` block, so they will be available to all LiveViews, LiveComponent's, and all modules that do `use MyAppWeb, :html` (replace "my_app" by the actual app name)
+- For application-wide template imports, import or alias them in the `html_helpers/0` block in `lib/tidewake_web.ex`, so they are available to all LiveViews, LiveComponents, and modules that do `use TidewakeWeb, :html`
 
 - Elixir supports `if/else` but **does NOT support `if/else if` or `if/elsif`**. **Never use `else if` or `elseif` in Elixir**, **always** use `cond` or `case` for multiple conditionals.
 
