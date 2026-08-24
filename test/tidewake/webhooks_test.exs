@@ -67,6 +67,16 @@ defmodule Tidewake.WebhooksTest do
       refute changeset.valid?
     end
 
+    test "update_endpoint/2 does not persist an invalid URL" do
+      endpoint = endpoint_fixture()
+
+      assert {:error, changeset} = Webhooks.update_endpoint(endpoint, %{url: "not-a-url"})
+      refute changeset.valid?
+
+      persisted_endpoint = Webhooks.get_endpoint(endpoint.id)
+      assert persisted_endpoint.url == endpoint.url
+    end
+
     test "change_endpoint/2 returns a changeset without persisting" do
       endpoint = endpoint_fixture()
 
