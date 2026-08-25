@@ -14,6 +14,8 @@ concurrency:
 
 env:
   MIX_ENV: test
+  OTP_VERSION: "28.4"
+  ELIXIR_VERSION: "1.19.5"
   POSTGRES_USER: postgres
   POSTGRES_PASSWORD: postgres
   POSTGRES_HOST: localhost
@@ -46,11 +48,17 @@ jobs:
       - name: Set up Erlang and Elixir
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "28.4"
-          elixir-version: "1.19.5"
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: deps
+          key: deps-${{ runner.os }}-otp-${{ env.OTP_VERSION }}-elixir-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.exs') }}-${{ hashFiles('mix.lock') }}
 
       - name: Install dependencies
-        run: mix deps.get
+        run: mix deps.get --check-locked
 
       - name: Check for unused locked dependencies
         run: mix deps.unlock --check-unused
