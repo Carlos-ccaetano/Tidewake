@@ -27,10 +27,14 @@ defmodule TidewakeWeb.Router do
     get "/", PageController, :home
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", TidewakeWeb do
-  #   pipe_through :api
-  # end
+  scope "/api", TidewakeWeb do
+    pipe_through :api
+
+    post "/endpoints", EndpointController, :create
+    get "/endpoints", EndpointController, :index
+    get "/endpoints/:id", EndpointController, :show
+    patch "/endpoints/:id", EndpointController, :update
+  end
 
   # Enable LiveDashboard in development
   if Application.compile_env(:tidewake, :dev_routes) do
