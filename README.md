@@ -2,7 +2,7 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint persistence is implemented through the `Tidewake.Webhooks.Endpoint` schema and the `Tidewake.Webhooks` context. The endpoint management HTTP API, event ingestion, webhook delivery, retries, idempotency, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint persistence and the endpoint management HTTP API are implemented through the `Tidewake.Webhooks` context and explicit Phoenix routes. Authentication, event ingestion, webhook delivery, retries, idempotency, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
 
 ## Relationship with Ironhold
 
@@ -30,7 +30,7 @@ Tidewake will eventually:
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
-See the planned [endpoint management API contract](docs/api/endpoints.md) for the initial endpoint representation and operations.
+See the [endpoint management API contract](docs/api/endpoints.md) for the endpoint representation and operations.
 
 ## Stack
 
@@ -76,6 +76,14 @@ Start the application:
     mix phx.server
 
 Open [http://localhost:4000](http://localhost:4000).
+
+The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api/endpoints/:id`, and `PATCH /api/endpoints/:id`. For example, create a persisted endpoint with:
+
+    curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
+      -H 'content-type: application/json' \
+      -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
+
+Authentication is not implemented yet, so do not expose this API to untrusted networks.
 
 Stop the database when finished:
 
@@ -130,7 +138,7 @@ Implemented endpoint persistence lives in `Tidewake.Webhooks`. Future responsibi
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, and a recorded attempt.
-3. Endpoint management HTTP API, signed delivery, retries, and idempotency.
+3. Signed delivery, retries, and idempotency.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 
