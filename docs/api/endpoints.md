@@ -2,9 +2,9 @@
 
 ## Status
 
-Endpoint persistence is implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema exist, and the `Tidewake.Webhooks` context provides operations to list, retrieve, create, update, and change endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
+Endpoint persistence and the endpoint management HTTP API are implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema persist endpoint data, while the `Tidewake.Webhooks` context and HTTP controller provide operations to list, retrieve, create, and update endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
 
-The HTTP API remains planned: routes and controllers have not been implemented. Webhook delivery has not been implemented.
+The HTTP API does not require authentication yet. Webhook delivery has not been implemented.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -23,7 +23,7 @@ An `Endpoint` has the following fields:
 
 Timestamps use ISO 8601 UTC values in the examples in this document.
 
-## Planned operations
+## Operations
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ Initial validation rules:
 - `name` is required and cannot be blank.
 - `url` is required and must be a valid HTTP or HTTPS URL.
 - `active` defaults to `true`.
-- Handling unknown fields is a pending implementation decision. The future implementation must either ignore or reject them consistently.
+- Unknown fields are ignored by the endpoint changeset.
 
 #### 201 Created
 
@@ -61,7 +61,7 @@ Returns the registered endpoint in a `data` object.
 ```json
 {
   "data": {
-    "id": "generated-id",
+    "id": 1,
     "name": "Ironhold",
     "url": "https://ironhold.example.com/api/webhooks",
     "active": true,
@@ -95,7 +95,7 @@ Returns endpoint objects in the `data` collection.
 {
   "data": [
     {
-      "id": "generated-id",
+      "id": 1,
       "name": "Ironhold",
       "url": "https://ironhold.example.com/api/webhooks",
       "active": true,
@@ -127,7 +127,7 @@ Returns the endpoint in a `data` object.
 ```json
 {
   "data": {
-    "id": "generated-id",
+    "id": 1,
     "name": "Ironhold",
     "url": "https://ironhold.example.com/api/webhooks",
     "active": true,
@@ -139,7 +139,7 @@ Returns the endpoint in a `data` object.
 
 #### 404 Not Found
 
-Returns a resource error when no endpoint has the requested identifier.
+Returns a resource error when no endpoint has the requested identifier or when the identifier is invalid.
 
 ```json
 {
@@ -162,7 +162,7 @@ For example, the following request deactivates the endpoint and prevents new del
 }
 ```
 
-The validation rules for supplied `name` and `url` values are the same as for endpoint creation. Handling unknown fields remains a pending implementation decision.
+The validation rules for supplied `name` and `url` values are the same as for endpoint creation. Unknown fields are ignored by the endpoint changeset.
 
 #### 200 OK
 
@@ -171,7 +171,7 @@ Returns the updated endpoint in a `data` object.
 ```json
 {
   "data": {
-    "id": "generated-id",
+    "id": 1,
     "name": "Ironhold",
     "url": "https://ironhold.example.com/api/webhooks",
     "active": false,
@@ -216,9 +216,8 @@ Error responses must not expose database details or stack traces.
 
 ## Current limitations
 
-This documentation task does not implement:
+The following capabilities remain outside the current implementation:
 
-- API routes or controllers;
 - authentication or authorization;
 - webhook delivery;
 - HMAC signing;
