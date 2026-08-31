@@ -40,10 +40,10 @@ Status: in progress
 Completed:
 
 - endpoint model and persistence, including schema validation and context operations.
+- HTTP management API for endpoint creation, listing, retrieval, and updates, including deactivation with `active: false`.
 
 Planned:
 
-- add the HTTP management API to register and disable endpoints;
 - associate endpoints with projects;
 - deliver with Req using explicit timeouts;
 - sign exact request bytes with versioned HMAC headers;
