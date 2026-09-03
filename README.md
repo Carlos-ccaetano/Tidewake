@@ -107,20 +107,21 @@ Production additionally requires DATABASE_URL and SECRET_KEY_BASE. PHX_HOST and 
 
 ## Quality checks
 
-Run the complete local quality suite:
+Run the code quality checks:
 
     mix quality
 
-Or run each check separately:
+Or run the dependency and code checks separately:
 
-    mix deps.get
+    mix deps.get --check-locked
+    mix deps.unlock --check-unused
     mix format --check-formatted
     mix compile --warnings-as-errors
     mix credo --strict
     mix sobelow
     mix test
 
-The generated mix precommit alias runs the same checks and also rejects unused locked dependencies.
+The `mix quality` alias runs the code checks above. The `mix precommit` alias also rejects unused dependencies recorded in `mix.lock`.
 
 ## Project organization
 
