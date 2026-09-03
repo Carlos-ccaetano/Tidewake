@@ -36,8 +36,9 @@ Add or update ExUnit tests for behavioral changes. Before opening a pull request
 
 The equivalent individual commands are:
 
-    mix format --check-formatted
     mix compile --warnings-as-errors
+    mix deps.unlock --check-unused
+    mix format --check-formatted
     mix credo --strict
     mix sobelow
     mix test
