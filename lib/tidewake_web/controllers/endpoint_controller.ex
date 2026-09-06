@@ -21,6 +21,7 @@ defmodule TidewakeWeb.EndpointController do
       {:ok, endpoint} ->
         conn
         |> put_status(:created)
+        |> put_resp_header("location", ~p"/api/endpoints/#{endpoint.id}")
         |> json(%{data: endpoint_data(endpoint)})
 
       {:error, changeset} ->
