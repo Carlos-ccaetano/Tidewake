@@ -10,6 +10,7 @@ Explain the problem or decision behind it.
 
 - [ ] mix format --check-formatted
 - [ ] mix compile --warnings-as-errors
+- [ ] mix deps.unlock --check-unused
 - [ ] mix credo --strict
 - [ ] mix sobelow
 - [ ] mix test
