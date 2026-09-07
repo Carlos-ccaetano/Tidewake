@@ -10,6 +10,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
       assert %{"data" => data} = json_response(conn, 201)
       endpoint = Webhooks.get_endpoint(data["id"])
 
+      assert get_resp_header(conn, "location") == [~p"/api/endpoints/#{data["id"]}"]
       assert_endpoint_data(data, endpoint)
     end
 
@@ -80,6 +81,12 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
       assert_not_found(conn)
     end
+
+    test "returns not found for a negative ID", %{conn: conn} do
+      conn = get(conn, ~p"/api/endpoints/-1")
+
+      assert_not_found(conn)
+    end
   end
 
   describe "PATCH /api/endpoints/:id" do
@@ -129,6 +136,18 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
       assert_not_found(conn)
     end
+
+    test "returns not found for an invalid ID", %{conn: conn} do
+      conn = patch(conn, ~p"/api/endpoints/not-an-id", %{name: "Invalid endpoint"})
+
+      assert_not_found(conn)
+    end
+
+    test "returns not found for zero", %{conn: conn} do
+      conn = patch(conn, ~p"/api/endpoints/0", %{name: "Invalid endpoint"})
+
+      assert_not_found(conn)
+    end
   end
 
   describe "unsupported routes" do
@@ -171,11 +190,11 @@ defmodule TidewakeWeb.EndpointControllerTest do
   end
 
   defp assert_not_found(conn) do
-    assert %{
+    assert json_response(conn, 404) == %{
              "error" => %{
                "code" => "not_found",
                "message" => "Endpoint not found"
              }
-           } = json_response(conn, 404)
+           }
   end
 end
