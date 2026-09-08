@@ -18,7 +18,7 @@ defmodule TidewakeWeb.EventControllerTest do
       assert data == event_data(event)
       assert event.event_type == "order.created"
       assert event.payload == payload
-      assert get_resp_header(conn, "location") == []
+      assert get_resp_header(conn, "location") == [~p"/api/events/#{event.id}"]
     end
 
     test "returns public field errors when required fields are missing", %{conn: conn} do
@@ -94,6 +94,41 @@ defmodule TidewakeWeb.EventControllerTest do
     end
   end
 
+  describe "GET /api/events/:id" do
+    test "returns an event by its internal ID", %{conn: conn} do
+      event = event_fixture()
+
+      conn = get(conn, ~p"/api/events/#{event.id}")
+
+      assert %{"data" => data} = json_response(conn, 200)
+      assert data == event_data(event)
+    end
+
+    test "returns not found for an unknown ID", %{conn: conn} do
+      conn = get(conn, ~p"/api/events/999999999")
+
+      assert_not_found(conn)
+    end
+
+    test "returns not found for an invalid ID", %{conn: conn} do
+      conn = get(conn, ~p"/api/events/not-an-id")
+
+      assert_not_found(conn)
+    end
+
+    test "returns not found for a negative ID", %{conn: conn} do
+      conn = get(conn, ~p"/api/events/-1")
+
+      assert_not_found(conn)
+    end
+
+    test "returns not found for zero", %{conn: conn} do
+      conn = get(conn, ~p"/api/events/0")
+
+      assert_not_found(conn)
+    end
+  end
+
   describe "unsupported event routes" do
     test "does not expose event listing", %{conn: conn} do
       conn = get(conn, ~p"/api/events")
@@ -101,11 +136,28 @@ defmodule TidewakeWeb.EventControllerTest do
       assert response(conn, 404)
     end
 
-    test "does not expose event retrieval", %{conn: conn} do
-      conn = get(conn, "/api/events/1")
+    test "does not expose event updates", %{conn: conn} do
+      conn = patch(conn, ~p"/api/events/1", %{type: "order.updated"})
 
       assert response(conn, 404)
     end
+
+    test "does not expose event deletion", %{conn: conn} do
+      conn = delete(conn, ~p"/api/events/1")
+
+      assert response(conn, 404)
+    end
+  end
+
+  defp event_fixture do
+    {:ok, event} =
+      Webhooks.create_event(%{
+        external_id: "evt_123",
+        event_type: "order.created",
+        payload: %{"order_id" => "123"}
+      })
+
+    event
   end
 
   defp valid_params(overrides) do
@@ -128,5 +180,14 @@ defmodule TidewakeWeb.EventControllerTest do
       "inserted_at" => DateTime.to_iso8601(event.inserted_at),
       "updated_at" => DateTime.to_iso8601(event.updated_at)
     }
+  end
+
+  defp assert_not_found(conn) do
+    assert json_response(conn, 404) == %{
+             "error" => %{
+               "code" => "not_found",
+               "message" => "Event not found"
+             }
+           }
   end
 end
