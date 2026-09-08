@@ -3,6 +3,13 @@ defmodule TidewakeWeb.EventController do
 
   alias Tidewake.Webhooks
 
+  def show(conn, %{"id" => id}) do
+    case fetch_event(id) do
+      {:ok, event} -> json(conn, %{data: event_data(event)})
+      :error -> not_found(conn)
+    end
+  end
+
   def create(conn, params) do
     attrs = %{
       external_id: params["external_id"],
@@ -14,6 +21,7 @@ defmodule TidewakeWeb.EventController do
       {:ok, event} ->
         conn
         |> put_status(:created)
+        |> put_resp_header("location", "/api/events/#{event.id}")
         |> json(%{data: event_data(event)})
 
       {:error, changeset} ->
@@ -36,6 +44,19 @@ defmodule TidewakeWeb.EventController do
     }
   end
 
+  defp fetch_event(id) do
+    case Integer.parse(id) do
+      {parsed_id, ""} when parsed_id > 0 ->
+        case Webhooks.get_event(parsed_id) do
+          nil -> :error
+          event -> {:ok, event}
+        end
+
+      _other ->
+        :error
+    end
+  end
+
   defp external_id_conflict?(changeset) do
     Enum.any?(changeset.errors, fn
       {:external_id, {_message, options}} -> options[:constraint] == :unique
@@ -52,6 +73,12 @@ defmodule TidewakeWeb.EventController do
         message: "An event with this external_id already exists"
       }
     })
+  end
+
+  defp not_found(conn) do
+    conn
+    |> put_status(:not_found)
+    |> json(%{error: %{code: "not_found", message: "Event not found"}})
   end
 
   defp validation_error(conn, changeset) do
