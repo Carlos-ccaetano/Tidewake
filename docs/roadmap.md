@@ -18,20 +18,29 @@ No webhook delivery behavior is part of this milestone.
 
 ## Milestone 1: first vertical slice
 
+Status: in progress
+
 Goal: prove the smallest durable workflow.
 
     event -> persistence -> Oban job -> recorded attempt
 
-Acceptance goals:
+Implemented:
 
-- an authenticated or explicitly development-scoped API accepts one event shape;
-- the event is persisted with a database-enforced idempotency key;
+- the event schema and database persistence for structured payloads;
+- a database-enforced unique index on `external_id` as the ingestion idempotency key;
+- `POST /api/events` for validation and persistence;
+- `GET /api/events/:id` for individual event retrieval;
+- tests for event validation, persistence, duplicate ingestion, and the implemented HTTP operations.
+
+Pending acceptance work:
+
+- authenticate the event API or explicitly restrict it to development;
 - one Oban job is inserted transactionally;
 - the job produces a recorded attempt through a deterministic local adapter;
-- tests cover duplicate ingestion and job retry behavior;
+- tests cover job retry behavior;
 - telemetry identifies acceptance and processing outcomes.
 
-This milestone should avoid real external delivery until state transitions are trustworthy.
+This milestone is not complete. It should avoid real external delivery until state transitions are trustworthy.
 
 ## Milestone 2: endpoints and signed delivery
 

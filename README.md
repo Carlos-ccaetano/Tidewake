@@ -2,7 +2,7 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint persistence and the endpoint management HTTP API are implemented through the `Tidewake.Webhooks` context and explicit Phoenix routes. Authentication, event ingestion, webhook delivery, retries, idempotency, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event persistence are implemented through the `Tidewake.Webhooks` context and explicit Phoenix routes. Event ingestion enforces idempotency with a unique database index on the client-provided `external_id`. Authentication, delivery and attempt processing, event jobs, outbound requests with Req, retries, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
 
 ## Relationship with Ironhold
 
@@ -16,21 +16,21 @@ This repository does not contain or modify Ironhold.
 
     Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
 
-Tidewake will eventually:
+Tidewake currently accepts, persists, and retrieves individual events through its HTTP API. It also manages registered destination endpoints. The broader architecture will eventually:
 
-- receive events through an HTTP API;
-- persist events and delivery state in PostgreSQL;
 - enqueue asynchronous work with Oban;
 - send signed webhook requests with Req;
 - record attempts, status, latency, and response metadata;
 - retry transient failures with exponential backoff;
-- enforce idempotency at ingestion and delivery boundaries;
+- enforce idempotency at the delivery boundary;
 - expose operational history through Phoenix LiveView;
 - emit logs, metrics, and basic audit information.
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
 See the [endpoint management API contract](docs/api/endpoints.md) for the endpoint representation and operations.
+
+See the [event ingestion API contract](docs/api/events.md) for event creation, retrieval, validation, and idempotency behavior.
 
 ## Stack
 
@@ -83,6 +83,8 @@ The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api
       -H 'content-type: application/json' \
       -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 
+The event API supports `POST /api/events` and `GET /api/events/:id`. Event listing, updates, and deletion are not implemented.
+
 Authentication is not implemented yet, so do not expose this API to untrusted networks.
 
 Stop the database when finished:
@@ -133,7 +135,7 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint persistence lives in `Tidewake.Webhooks`. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint and event persistence lives in `Tidewake.Webhooks`. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
