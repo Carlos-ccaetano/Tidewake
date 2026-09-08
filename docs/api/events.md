@@ -2,7 +2,16 @@
 
 ## Status
 
-This document defines the initial contract before implementation. Event ingestion is not implemented yet. This stage covers only validation and persistence of an immutable event; no delivery is created, scheduled, or executed.
+Event persistence and the HTTP operations to create and retrieve individual events are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
+
+No delivery is created, scheduled, or executed when an event is accepted. Delivery, attempts, jobs, outbound requests, signing, and retries remain pending.
+
+## Operations
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/events` | Validate and persist a new event. |
+| `GET` | `/api/events/:id` | Retrieve one event by its internal ID. |
 
 ## POST /api/events
 
@@ -39,7 +48,7 @@ Missing fields, `null` values, empty or whitespace-only strings for `external_id
 
 ### Idempotency and immutability
 
-`external_id` must be unique across accepted events in this initial contract. Uniqueness must be enforced by a database constraint, including for concurrent requests. A new valid event is persisted before returning `201 Created`.
+`external_id` must be unique across accepted events. The `events_external_id_index` unique database index enforces this invariant, including for concurrent requests. A new valid event is persisted before returning `201 Created`.
 
 A subsequent valid request with an existing `external_id` returns `409 Conflict`, whether its `type` and `data` match the original event or differ. It does not create another event, replace the original, or return a second `201 Created`.
 
@@ -53,14 +62,19 @@ Responses use `Content-Type: application/json`. Successful responses wrap the ac
 
 Returned after a new valid event has been persisted. The initial response includes the accepted fields:
 
+The response includes a `Location: /api/events/:id` header pointing to the retrieval operation.
+
 ```json
 {
   "data": {
+    "id": 1,
     "external_id": "evt_123",
     "type": "order.created",
     "data": {
       "order_id": "123"
-    }
+    },
+    "inserted_at": "2026-09-08T08:00:00.000000Z",
+    "updated_at": "2026-09-08T08:00:00.000000Z"
   }
 }
 ```
@@ -98,6 +112,42 @@ Returned when a valid payload uses an `external_id` that already exists. The ori
 
 Error responses must not expose database details or stack traces.
 
+## GET /api/events/:id
+
+Retrieves an event by its positive integer internal ID. It does not use `external_id` as the path identifier.
+
+### 200 OK
+
+Returns the same event representation used by the creation response:
+
+```json
+{
+  "data": {
+    "id": 1,
+    "external_id": "evt_123",
+    "type": "order.created",
+    "data": {
+      "order_id": "123"
+    },
+    "inserted_at": "2026-09-08T08:00:00.000000Z",
+    "updated_at": "2026-09-08T08:00:00.000000Z"
+  }
+}
+```
+
+### 404 Not Found
+
+Returned when the internal ID does not exist or the path value is invalid, negative, or zero:
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Event not found"
+  }
+}
+```
+
 ## Out of scope
 
 - Destination endpoint operations or associations.
@@ -107,6 +157,6 @@ Error responses must not expose database details or stack traces.
 - HMAC signing.
 - Retries and backoff.
 - Authentication and authorization.
-- Event listing and retrieval.
+- Event listing, updates, and deletion.
 
-These capabilities require separate work. This contract does not implement code or complete the broader delivery workflow described in the architecture and roadmap.
+These capabilities require separate work. The implemented ingestion and retrieval operations do not complete the broader delivery workflow described in the architecture and roadmap.
