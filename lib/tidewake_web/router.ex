@@ -30,6 +30,7 @@ defmodule TidewakeWeb.Router do
   scope "/api", TidewakeWeb do
     pipe_through :api
 
+    post "/events", EventController, :create
     post "/endpoints", EndpointController, :create
     get "/endpoints", EndpointController, :index
     get "/endpoints/:id", EndpointController, :show
