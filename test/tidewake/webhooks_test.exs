@@ -50,6 +50,64 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "deliveries" do
+    test "create_delivery/2 persists a pending delivery for an active endpoint" do
+      event = event_fixture()
+      endpoint = endpoint_fixture()
+
+      assert {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+      assert delivery.event_id == event.id
+      assert delivery.endpoint_id == endpoint.id
+      assert delivery.status == "pending"
+      assert delivery.attempt_count == 0
+    end
+
+    test "get_delivery/1 returns a delivery by its internal ID" do
+      event = event_fixture()
+      endpoint = endpoint_fixture()
+      {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+
+      assert Webhooks.get_delivery(delivery.id) == delivery
+    end
+
+    test "get_delivery/1 returns nil for an unknown ID" do
+      assert Webhooks.get_delivery(-1) == nil
+    end
+
+    test "get_delivery_by_event_and_endpoint/2 returns the matching delivery" do
+      event = event_fixture()
+      endpoint = endpoint_fixture()
+      {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+
+      assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == delivery
+    end
+
+    test "get_delivery_by_event_and_endpoint/2 returns nil without a matching delivery" do
+      event = event_fixture()
+      endpoint = endpoint_fixture()
+
+      assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == nil
+    end
+
+    test "create_delivery/2 returns an invalid changeset for a duplicate pair" do
+      event = event_fixture()
+      endpoint = endpoint_fixture()
+      assert {:ok, _delivery} = Webhooks.create_delivery(event, endpoint)
+
+      assert {:error, %Changeset{} = changeset} = Webhooks.create_delivery(event, endpoint)
+      refute changeset.valid?
+      assert "has already been taken" in errors_on(changeset).event_id
+    end
+
+    test "create_delivery/2 refuses an inactive endpoint" do
+      event = event_fixture()
+      endpoint = endpoint_fixture(%{active: false})
+
+      assert {:error, :endpoint_inactive} = Webhooks.create_delivery(event, endpoint)
+      assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == nil
+    end
+  end
+
   describe "endpoints" do
     test "create_endpoint/1 creates a valid endpoint" do
       assert {:ok, endpoint} = Webhooks.create_endpoint(valid_attrs())
