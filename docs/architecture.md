@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the intended direction for Tidewake. The technical foundation is available, and the `Endpoint` model, persistence, and endpoint management HTTP API are implemented. Event ingestion and the delivery workflow, including HMAC signing, attempt recording, and retries, are not implemented yet.
+This document describes the intended direction for Tidewake. The technical foundation, endpoint management, event ingestion and individual retrieval, and delivery persistence operations are implemented. Automatic delivery creation, attempt persistence, delivery jobs and processing, outbound requests with Req, HMAC signing, and retries are not implemented yet.
 
 ## System boundary
 
@@ -28,7 +28,7 @@ Ironhold remains an independent system and repository. Tidewake must not depend 
 8. A transient failure schedules a bounded retry with exponential backoff.
 9. Operators inspect history and status through Phoenix LiveView and telemetry.
 
-This is the intended flow, not current runtime behavior. Today, the repository provides the application and database foundation, Oban tables and supporting tooling, plus the persisted `Endpoint` model and HTTP operations to list, retrieve, create, and update endpoints. It does not ingest events or create and send deliveries; HMAC signing, delivery attempts, and retry scheduling remain future work.
+This is the intended flow, not current runtime behavior. Today, the repository persists endpoints, events, and deliveries. The HTTP API manages endpoints and supports event ingestion and individual event retrieval. `Tidewake.Webhooks` can create and retrieve a delivery when given an event and an active endpoint, but the event API does not create deliveries automatically. There are no delivery jobs, state processing, outbound requests with Req, HMAC signing, attempt persistence, external sending, or retries.
 
 ## Current and future entities
 
@@ -49,33 +49,34 @@ Future responsibilities may include:
 
 ### Event
 
-This future entity will represent an immutable fact accepted from a client.
+The implemented `Event` model represents an immutable fact accepted from a client. Events are persisted with an event type, structured payload, and microsecond UTC timestamps. `external_id` is the client-provided idempotency key and has a unique database index.
 
-Expected responsibilities:
+Current responsibilities:
 
-- project ownership;
-- stable external identifier and idempotency key;
-- event type and structured payload;
-- ingestion timestamp;
-- validation and acceptance metadata.
+- validating and persisting events through `Tidewake.Webhooks`;
+- rejecting duplicate `external_id` values through the database constraint;
+- supporting `POST /api/events` and individual retrieval through `GET /api/events/:id`;
+- remaining immutable, with no update or delete operations.
+
+Project ownership and additional acceptance metadata remain future responsibilities.
 
 ### Delivery
 
-This future entity will represent the intention to send one event to one endpoint.
+The implemented `Delivery` model represents the intention to send one event to one endpoint. Its table, schema, and minimal operations in `Tidewake.Webhooks` are available.
 
-Expected responsibilities:
+Current responsibilities:
 
-- event and endpoint association;
-- state such as pending, processing, succeeded, exhausted, or cancelled;
-- next attempt timestamp;
-- retry count and terminal outcome;
-- concurrency and idempotency safeguards.
+- requiring event and endpoint associations with a unique database constraint on the pair;
+- starting in `pending` and retaining the initial lifecycle fields;
+- allowing context-level creation for an active endpoint and retrieval by ID or by the event and endpoint pair.
+
+No API operation creates deliveries automatically. Jobs, lifecycle processing, outbound sending, attempt recording, and retries remain future responsibilities.
 
 ### Attempt
 
-This future entity will represent one outbound HTTP attempt for a delivery.
+`Attempt` currently has only the recording contract in ADR 0003. It has no table, schema, context operation, or runtime persistence.
 
-Expected responsibilities:
+Future responsibilities:
 
 - attempt number and start/finish timestamps;
 - HTTP status or normalized transport error;
@@ -87,10 +88,10 @@ Attempts should be append-only operational evidence. Sensitive headers, secrets,
 
 ## Future code boundaries
 
-`Tidewake.Webhooks` currently manages endpoint persistence and operations. Additional context responsibilities and namespaces may emerge as behavior is implemented:
+`Tidewake.Webhooks` currently manages endpoint, event, and delivery persistence operations. Additional context responsibilities and namespaces may emerge as behavior is implemented:
 
 - Tidewake.Projects for ownership and endpoint registration;
-- Tidewake.Webhooks may expand to cover events, deliveries, and attempts;
+- Tidewake.Webhooks may expand to cover attempt persistence and delivery processing;
 - Tidewake.Security for signing and secret handling;
 - Tidewake.Observability for metrics and audit reporting;
 - Tidewake.Workers for Oban workers and retry orchestration.
