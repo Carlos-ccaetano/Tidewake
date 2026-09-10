@@ -108,6 +108,86 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "attempts" do
+    test "create_attempt/2 persists attrs with the delivery ID set programmatically" do
+      delivery = delivery_fixture()
+      attrs = valid_attempt_attrs()
+
+      assert {:ok, attempt} =
+               Webhooks.create_attempt(delivery, Map.put(attrs, :delivery_id, -1))
+
+      assert attempt.delivery_id == delivery.id
+      assert attempt.attempt_number == attrs.attempt_number
+      assert attempt.result == attrs.result
+      assert attempt.http_status == attrs.http_status
+      assert attempt.error_type == attrs.error_type
+      assert attempt.duration_ms == attrs.duration_ms
+      assert attempt.started_at == attrs.started_at
+      assert attempt.completed_at == attrs.completed_at
+      assert attempt.response_metadata == attrs.response_metadata
+    end
+
+    test "create_attempt/2 returns an invalid changeset for invalid attrs" do
+      delivery = delivery_fixture()
+
+      assert {:error, %Changeset{} = changeset} = Webhooks.create_attempt(delivery, %{})
+      refute changeset.valid?
+    end
+
+    test "get_attempt/1 returns an attempt by its internal ID" do
+      delivery = delivery_fixture()
+      attempt = attempt_fixture(delivery)
+
+      assert Webhooks.get_attempt(attempt.id) == attempt
+    end
+
+    test "get_attempt/1 returns nil for an unknown ID" do
+      assert Webhooks.get_attempt(-1) == nil
+    end
+
+    test "list_attempts/1 returns only the delivery attempts ordered by attempt number" do
+      event = event_fixture()
+      first_endpoint = endpoint_fixture()
+
+      second_endpoint =
+        endpoint_fixture(%{
+          name: "Secondary",
+          url: "https://secondary.example.com/webhooks"
+        })
+
+      {:ok, delivery} = Webhooks.create_delivery(event, first_endpoint)
+      {:ok, other_delivery} = Webhooks.create_delivery(event, second_endpoint)
+
+      second_attempt = attempt_fixture(delivery, %{attempt_number: 2})
+      first_attempt = attempt_fixture(delivery, %{attempt_number: 1})
+      _other_attempt = attempt_fixture(other_delivery)
+
+      assert Webhooks.list_attempts(delivery) == [first_attempt, second_attempt]
+    end
+
+    test "create_attempt/2 returns an invalid changeset for a duplicate number" do
+      delivery = delivery_fixture()
+      attempt_fixture(delivery)
+
+      assert {:error, %Changeset{} = changeset} =
+               Webhooks.create_attempt(delivery, valid_attempt_attrs())
+
+      refute changeset.valid?
+      assert "has already been taken" in errors_on(changeset).delivery_id
+    end
+
+    test "create_attempt/2 does not change delivery state or attempt_count" do
+      delivery = delivery_fixture()
+
+      assert {:ok, _attempt} = Webhooks.create_attempt(delivery, valid_attempt_attrs())
+
+      persisted_delivery = Webhooks.get_delivery(delivery.id)
+      assert persisted_delivery.status == "pending"
+      assert persisted_delivery.attempt_count == 0
+      assert persisted_delivery.updated_at == delivery.updated_at
+    end
+  end
+
   describe "endpoints" do
     test "create_endpoint/1 creates a valid endpoint" do
       assert {:ok, endpoint} = Webhooks.create_endpoint(valid_attrs())
@@ -208,6 +288,36 @@ defmodule Tidewake.WebhooksTest do
     attrs = Map.merge(valid_attrs(), attrs)
     {:ok, endpoint} = Webhooks.create_endpoint(attrs)
     endpoint
+  end
+
+  defp delivery_fixture do
+    event = event_fixture()
+    endpoint = endpoint_fixture()
+    {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+    delivery
+  end
+
+  defp attempt_fixture(delivery, attrs \\ %{}) do
+    attrs = Map.merge(valid_attempt_attrs(), attrs)
+    {:ok, attempt} = Webhooks.create_attempt(delivery, attrs)
+    attempt
+  end
+
+  defp valid_attempt_attrs do
+    %{
+      attempt_number: 1,
+      result: "succeeded",
+      http_status: 200,
+      error_type: nil,
+      duration_ms: 125,
+      started_at: ~U[2026-09-10 12:00:00.123456Z],
+      completed_at: ~U[2026-09-10 12:00:00.248456Z],
+      response_metadata: %{
+        "content_type" => "application/json",
+        "content_length" => 42,
+        "request_id" => "req_123"
+      }
+    }
   end
 
   defp valid_attrs do
