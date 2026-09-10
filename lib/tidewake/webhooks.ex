@@ -40,6 +40,21 @@ defmodule Tidewake.Webhooks do
     Repo.get_by(Delivery, event_id: event.id, endpoint_id: endpoint.id)
   end
 
+  def claim_delivery(id) do
+    now = DateTime.utc_now()
+
+    query =
+      from(delivery in Delivery,
+        where: delivery.id == ^id and delivery.status == "pending",
+        select: delivery
+      )
+
+    case Repo.update_all(query, set: [status: "processing", updated_at: now]) do
+      {1, [delivery]} -> {:ok, Repo.preload(delivery, [:event, :endpoint])}
+      {0, []} -> claim_delivery_error(id)
+    end
+  end
+
   def create_attempt(%Delivery{} = delivery, attrs) do
     %Attempt{delivery_id: delivery.id}
     |> Attempt.changeset(attrs)
@@ -80,5 +95,12 @@ defmodule Tidewake.Webhooks do
 
   def change_endpoint(%Endpoint{} = endpoint, attrs \\ %{}) do
     Endpoint.changeset(endpoint, attrs)
+  end
+
+  defp claim_delivery_error(id) do
+    case Repo.get(Delivery, id) do
+      nil -> {:error, :not_found}
+      %Delivery{} -> {:error, :invalid_transition}
+    end
   end
 end
