@@ -106,6 +106,35 @@ defmodule Tidewake.WebhooksTest do
       assert {:error, :endpoint_inactive} = Webhooks.create_delivery(event, endpoint)
       assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == nil
     end
+
+    test "claim_delivery/1 atomically moves a pending delivery to processing" do
+      delivery = delivery_fixture()
+
+      assert {:ok, claimed_delivery} = Webhooks.claim_delivery(delivery.id)
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 0
+      assert claimed_delivery.completed_at == nil
+      assert claimed_delivery.event.id == delivery.event_id
+      assert claimed_delivery.endpoint.id == delivery.endpoint_id
+      assert Ecto.assoc_loaded?(claimed_delivery.event)
+      assert Ecto.assoc_loaded?(claimed_delivery.endpoint)
+      assert Webhooks.list_attempts(claimed_delivery) == []
+    end
+
+    test "claim_delivery/1 returns not_found for an unknown ID" do
+      assert {:error, :not_found} = Webhooks.claim_delivery(-1)
+    end
+
+    test "only one of two independent claims succeeds" do
+      delivery = delivery_fixture()
+
+      first_claim = Webhooks.claim_delivery(delivery.id)
+      second_claim = Webhooks.claim_delivery(delivery.id)
+
+      assert {:ok, claimed_delivery} = first_claim
+      assert claimed_delivery.status == "processing"
+      assert {:error, :invalid_transition} = second_claim
+    end
   end
 
   describe "attempts" do
