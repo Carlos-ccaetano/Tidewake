@@ -3,8 +3,10 @@ defmodule Tidewake.Webhooks do
   Manages webhook events, destination endpoints, and their persistence.
   """
 
+  import Ecto.Query, only: [from: 2]
+
   alias Tidewake.Repo
-  alias Tidewake.Webhooks.{Delivery, Endpoint, Event}
+  alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
 
   def create_event(attrs) do
     %Event{}
@@ -36,6 +38,24 @@ defmodule Tidewake.Webhooks do
 
   def get_delivery_by_event_and_endpoint(%Event{} = event, %Endpoint{} = endpoint) do
     Repo.get_by(Delivery, event_id: event.id, endpoint_id: endpoint.id)
+  end
+
+  def create_attempt(%Delivery{} = delivery, attrs) do
+    %Attempt{delivery_id: delivery.id}
+    |> Attempt.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  def get_attempt(id) do
+    Repo.get(Attempt, id)
+  end
+
+  def list_attempts(%Delivery{} = delivery) do
+    from(attempt in Attempt,
+      where: attempt.delivery_id == ^delivery.id,
+      order_by: [asc: attempt.attempt_number]
+    )
+    |> Repo.all()
   end
 
   def list_endpoints do
