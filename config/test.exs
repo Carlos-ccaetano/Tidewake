@@ -28,6 +28,8 @@ config :logger, level: :warning
 
 config :tidewake, Oban, testing: :inline, queues: false, plugins: false
 
+config :tidewake, :delivery_adapter, Tidewake.Webhooks.DeliveryAdapters.Deterministic
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
