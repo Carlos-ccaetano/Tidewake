@@ -137,6 +137,118 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "finalize_delivery/2" do
+    test "persists a successful attempt and finalizes together" do
+      delivery = delivery_fixture()
+      assert {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+      attrs = Map.put(valid_attempt_attrs(), :attempt_number, 999)
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               Webhooks.finalize_delivery(delivery.id, attrs)
+
+      assert finalized.status == "succeeded"
+      assert finalized.attempt_count == 1
+      assert finalized.completed_at == attrs.completed_at
+      assert attempt.delivery_id == delivery.id
+      assert attempt.attempt_number == 1
+      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.list_attempts(finalized) == [attempt]
+    end
+
+    test "finalizes HTTP and transport failures" do
+      for {result, status} <- [{"http_error", 503}, {"transport_error", nil}] do
+        event = event_fixture(%{external_id: result})
+        endpoint = endpoint_fixture()
+        {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+        {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+        attrs = Map.merge(valid_attempt_attrs(), %{result: result, http_status: status})
+
+        assert {:ok, %{delivery: finalized, attempt: attempt}} =
+                 Webhooks.finalize_delivery(delivery.id, attrs)
+
+        assert finalized.status == "failed"
+        assert finalized.attempt_count == 1
+        assert finalized.completed_at == attempt.completed_at
+        assert attempt.result == result
+      end
+    end
+
+    test "uses the persisted counter and accepts string-keyed attributes" do
+      delivery = delivery_fixture()
+
+      {:ok, _delivery} =
+        delivery
+        |> change(attempt_count: 2)
+        |> Repo.update()
+
+      {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+      attrs = Map.new(valid_attempt_attrs(), fn {key, value} -> {Atom.to_string(key), value} end)
+      attrs = Map.put(attrs, "attempt_number", 99)
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               Webhooks.finalize_delivery(delivery.id, attrs)
+
+      assert attempt.attempt_number == 3
+      assert finalized.attempt_count == 3
+    end
+
+    test "invalid attempts leave the delivery and attempt history unchanged" do
+      delivery = delivery_fixture()
+      {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+      before = Webhooks.get_delivery(delivery.id)
+
+      assert {:error, %Changeset{} = changeset} =
+               Webhooks.finalize_delivery(delivery.id, %{duration_ms: -1})
+
+      refute changeset.valid?
+      assert Webhooks.get_delivery(delivery.id) == before
+      assert Webhooks.list_attempts(delivery) == []
+    end
+
+    test "a duplicate attempt rolls back without changing the delivery" do
+      delivery = delivery_fixture()
+      existing = attempt_fixture(delivery)
+      {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+      before = Webhooks.get_delivery(delivery.id)
+
+      assert {:error, %Changeset{} = changeset} =
+               Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
+
+      refute changeset.valid?
+      assert Webhooks.get_delivery(delivery.id) == before
+      assert Webhooks.list_attempts(delivery) == [existing]
+    end
+
+    test "rejects missing deliveries and every non-processing state" do
+      assert {:error, :not_found} = Webhooks.finalize_delivery(-1, valid_attempt_attrs())
+      delivery = delivery_fixture()
+
+      for status <- ["pending", "succeeded", "failed"] do
+        {:ok, current} = delivery |> change(status: status) |> Repo.update()
+
+        assert {:error, :invalid_transition} =
+                 Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
+
+        assert Webhooks.get_delivery(delivery.id) == current
+        assert Webhooks.list_attempts(delivery) == []
+      end
+    end
+
+    test "a second finalization cannot append another attempt" do
+      delivery = delivery_fixture()
+      {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
+
+      assert {:error, :invalid_transition} =
+               Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
+
+      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.list_attempts(delivery) == [attempt]
+    end
+  end
+
   describe "attempts" do
     test "create_attempt/2 persists attrs with the delivery ID set programmatically" do
       delivery = delivery_fixture()
