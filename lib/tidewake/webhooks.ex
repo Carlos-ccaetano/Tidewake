@@ -55,6 +55,23 @@ defmodule Tidewake.Webhooks do
     end
   end
 
+  def finalize_delivery(delivery_id, attempt_attrs) do
+    Repo.transaction(fn ->
+      query = from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
+
+      case Repo.one(query) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delivery{status: "processing"} = delivery ->
+          finalize_processing_delivery(delivery, attempt_attrs)
+
+        %Delivery{} ->
+          Repo.rollback(:invalid_transition)
+      end
+    end)
+  end
+
   def create_attempt(%Delivery{} = delivery, attrs) do
     %Attempt{delivery_id: delivery.id}
     |> Attempt.changeset(attrs)
@@ -95,6 +112,26 @@ defmodule Tidewake.Webhooks do
 
   def change_endpoint(%Endpoint{} = endpoint, attrs \\ %{}) do
     Endpoint.changeset(endpoint, attrs)
+  end
+
+  defp finalize_processing_delivery(delivery, attrs) do
+    attempt_changeset =
+      %Attempt{delivery_id: delivery.id, attempt_number: delivery.attempt_count + 1}
+      |> Attempt.changeset(Map.drop(attrs, [:attempt_number, "attempt_number"]))
+
+    with {:ok, attempt} <- Repo.insert(attempt_changeset),
+         {:ok, finalized} <-
+           delivery
+           |> Delivery.changeset(%{
+             status: if(attempt.result == "succeeded", do: "succeeded", else: "failed"),
+             attempt_count: delivery.attempt_count + 1,
+             completed_at: attempt.completed_at
+           })
+           |> Repo.update() do
+      %{delivery: finalized, attempt: attempt}
+    else
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
   end
 
   defp claim_delivery_error(id) do
