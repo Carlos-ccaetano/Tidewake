@@ -8,8 +8,6 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   @behaviour Tidewake.Webhooks.DeliveryAdapter
 
   @impl true
-  def deliver("https://endpoint.invalid/timeout", _body, _headers), do: {:error, :timeout}
-
   def deliver(url, body, headers) do
     send(self(), {:delivered, url, body, headers})
     Process.get(:adapter_response, {:ok, %{status: 204, headers: [{"set-cookie", "secret"}]}})
@@ -198,19 +196,77 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert Webhooks.list_attempts(delivery) == [result.attempt]
   end
 
-  test "propagates adapter errors without recording a successful attempt" do
+  for {reason, error_type} <- [
+        timeout: "timeout",
+        dns_error: "dns",
+        tls_error: "tls",
+        connection_refused: "connection",
+        connection_closed: "closed",
+        internal_adapter_detail: "unknown"
+      ] do
+    test "persists transport failure #{reason} as #{error_type}" do
+      reason = unquote(reason)
+      error_type = unquote(error_type)
+      delivery = delivery_fixture()
+      Process.put(:adapter_response, {:error, reason})
+      before_processing = DateTime.utc_now()
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               DeliveryProcessor.process(delivery.id, __MODULE__)
+
+      after_processing = DateTime.utc_now()
+      assert_received {:delivered, _, _, _}
+      assert finalized.status == "failed"
+      assert finalized.attempt_count == 1
+      assert finalized.completed_at == attempt.completed_at
+      assert attempt.delivery_id == delivery.id
+      assert attempt.attempt_number == 1
+      assert attempt.result == "transport_error"
+      assert attempt.http_status == nil
+      assert attempt.error_type == error_type
+
+      if error_type == "unknown" do
+        refute attempt.error_type == Atom.to_string(reason)
+      end
+
+      assert attempt.response_metadata == nil
+      assert is_integer(attempt.duration_ms)
+      assert attempt.duration_ms >= 0
+      assert attempt.started_at.time_zone == "Etc/UTC"
+      assert attempt.completed_at.time_zone == "Etc/UTC"
+      assert elem(attempt.started_at.microsecond, 1) == 6
+      assert elem(attempt.completed_at.microsecond, 1) == 6
+      assert DateTime.compare(attempt.started_at, before_processing) in [:eq, :gt]
+      assert DateTime.compare(attempt.completed_at, attempt.started_at) in [:eq, :gt]
+      assert DateTime.compare(attempt.completed_at, after_processing) in [:eq, :lt]
+      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.list_attempts(delivery) == [attempt]
+    end
+  end
+
+  test "returns a changeset error when transport failure finalization cannot insert the attempt" do
     delivery = delivery_fixture()
-    endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+    timestamp = DateTime.utc_now()
 
-    {:ok, _endpoint} =
-      Webhooks.update_endpoint(endpoint, %{url: "https://endpoint.invalid/timeout"})
+    assert {:ok, existing_attempt} =
+             Webhooks.create_attempt(delivery, %{
+               attempt_number: 1,
+               result: "transport_error",
+               error_type: "timeout",
+               duration_ms: 0,
+               started_at: timestamp,
+               completed_at: timestamp
+             })
 
-    assert {:error, :timeout} = DeliveryProcessor.process(delivery.id, __MODULE__)
+    Process.put(:adapter_response, {:error, :timeout})
+
+    assert {:error, %Ecto.Changeset{}} = DeliveryProcessor.process(delivery.id, __MODULE__)
+    assert_received {:delivered, _, _, _}
     persisted = Webhooks.get_delivery(delivery.id)
     assert persisted.status == "processing"
     assert persisted.attempt_count == 0
     assert persisted.completed_at == nil
-    assert Webhooks.list_attempts(delivery) == []
+    assert Webhooks.list_attempts(delivery) == [existing_attempt]
   end
 
   defp delivery_fixture do
