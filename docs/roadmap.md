@@ -26,21 +26,27 @@ Goal: prove the smallest durable workflow.
 
 Implemented:
 
-- the event schema and database persistence for structured payloads;
+- schemas, context operations, and database persistence for events, deliveries, and attempts;
 - a database-enforced unique index on `external_id` as the ingestion idempotency key;
 - `POST /api/events` for validation and persistence;
 - `GET /api/events/:id` for individual event retrieval;
-- tests for event validation, persistence, duplicate ingestion, and the implemented HTTP operations.
+- tests for event validation, persistence, duplicate ingestion, and the implemented HTTP operations;
+- atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
+- an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
+- a deterministic local adapter returning simulated HTTP 204 without external requests;
+- attempt creation in the success path, atomically finalized with the delivery and its counter;
+- the `pending → processing → succeeded` transition, with atomic claim and finalization;
+- tests for transactional scheduling, rollback, and successful processing through the worker.
 
 Pending acceptance work:
 
 - authenticate the event API or explicitly restrict it to development;
-- one Oban job is inserted transactionally;
-- the job produces a recorded attempt through a deterministic local adapter;
-- tests cover job retry behavior;
-- telemetry identifies acceptance and processing outcomes.
+- connect event ingestion to fan-out for active endpoints;
+- process and record HTTP and transport failures;
+- test the complete failure cycle through the worker;
+- add telemetry for event acceptance and processing outcomes.
 
-This milestone is not complete. It should avoid real external delivery until state transitions are trustworthy.
+This milestone is not complete. The local success path is available through explicit scheduling, but ingestion does not trigger it automatically. Failure processing and acceptance/processing telemetry remain pending. No real external delivery is enabled, and retry policy remains in Milestone 3.
 
 ## Milestone 2: endpoints and signed delivery
 
@@ -56,7 +62,7 @@ Planned:
 - associate endpoints with projects;
 - deliver with Req using explicit timeouts;
 - sign exact request bytes with versioned HMAC headers;
-- record delivery attempts and safe response metadata;
+- integrate external delivery responses with attempt recording and safe response metadata;
 - test signatures and transport classification.
 
 ## Milestone 3: retry and idempotency hardening
