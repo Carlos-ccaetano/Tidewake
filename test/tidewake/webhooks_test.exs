@@ -1,5 +1,5 @@
 defmodule Tidewake.WebhooksTest do
-  use Tidewake.DataCase, async: true
+  use Tidewake.DataCase, async: false
 
   alias Ecto.Changeset
   alias Tidewake.Webhooks
@@ -47,6 +47,84 @@ defmodule Tidewake.WebhooksTest do
 
     test "get_event_by_external_id/1 returns nil for an unknown external ID" do
       assert Webhooks.get_event_by_external_id("unknown") == nil
+    end
+  end
+
+  describe "schedule_delivery/2" do
+    test "persists a pending delivery and the correct unique job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        event = event_fixture()
+        endpoint = endpoint_fixture()
+
+        assert {:ok, %{delivery: delivery, job: job}} =
+                 Webhooks.schedule_delivery(event, endpoint)
+
+        assert delivery.status == "pending"
+        assert delivery.attempt_count == 0
+        assert job.args == %{"delivery_id" => delivery.id}
+        assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
+        assert job.queue == "default"
+        assert job.max_attempts == 1
+        assert job.state == "available"
+        assert Repo.get(Oban.Job, job.id).args == job.args
+        assert Webhooks.get_delivery(delivery.id) == delivery
+        assert job.unique.keys == [:delivery_id]
+        assert job.unique.period == :infinity
+      end)
+    end
+
+    test "an inactive endpoint creates neither delivery nor job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        event = event_fixture()
+        endpoint = endpoint_fixture(%{active: false})
+
+        assert {:error, :delivery, :endpoint_inactive, %{}} =
+                 Webhooks.schedule_delivery(event, endpoint)
+
+        assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == nil
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "duplicate scheduling does not create another job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        event = event_fixture()
+        endpoint = endpoint_fixture()
+        assert {:ok, %{job: job}} = Webhooks.schedule_delivery(event, endpoint)
+
+        assert {:error, :delivery, %Changeset{}, %{}} =
+                 Webhooks.schedule_delivery(event, endpoint)
+
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [job.id]
+      end)
+    end
+
+    test "a rejected job insertion rolls back the delivery" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        event = event_fixture()
+        endpoint = endpoint_fixture()
+
+        # Transactional DDL is reverted by the sandbox; these tests run synchronously.
+        Repo.query!("""
+        ALTER TABLE oban_jobs ADD CONSTRAINT reject_scheduling_test_job
+        CHECK (worker <> 'Tidewake.Workers.DeliverWebhookWorker')
+        """)
+
+        assert_raise Ecto.ConstraintError, fn ->
+          Webhooks.schedule_delivery(event, endpoint)
+        end
+
+        assert Webhooks.get_delivery_by_event_and_endpoint(event, endpoint) == nil
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "create_delivery still persists without scheduling a job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        assert {:ok, delivery} = Webhooks.create_delivery(event_fixture(), endpoint_fixture())
+        assert delivery.status == "pending"
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
     end
   end
 
