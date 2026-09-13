@@ -2,7 +2,9 @@
 
 ## Status
 
-This document describes the intended direction for Tidewake. The technical foundation, endpoint management, event ingestion and individual retrieval, and delivery persistence operations are implemented. Automatic delivery creation, attempt persistence, delivery jobs and processing, outbound requests with Req, HMAC signing, and retries are not implemented yet.
+This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Atomic delivery claim and finalization, the adapter contract, a deterministic local adapter, JSON envelope encoding, success-path processing, an Oban worker, and atomic delivery/job scheduling through `schedule_delivery/2` are available.
+
+Automatic linkage from event ingestion to deliveries, fan-out to active endpoints, recording HTTP and transport failure paths in the processor, a Req adapter in use, HMAC signing, retries, recovery of deliveries stuck in `processing`, and an operational interface remain pending. Real external deliveries are not enabled; the deterministic adapter simulates a 204 response without I/O and is configured only for tests.
 
 ## System boundary
 
@@ -28,7 +30,15 @@ Ironhold remains an independent system and repository. Tidewake must not depend 
 8. A transient failure schedules a bounded retry with exponential backoff.
 9. Operators inspect history and status through Phoenix LiveView and telemetry.
 
-This is the intended flow, not current runtime behavior. Today, the repository persists endpoints, events, and deliveries. The HTTP API manages endpoints and supports event ingestion and individual event retrieval. `Tidewake.Webhooks` can create and retrieve a delivery when given an event and an active endpoint, but the event API does not create deliveries automatically. There are no delivery jobs, state processing, outbound requests with Req, HMAC signing, attempt persistence, external sending, or retries.
+The complete flow above remains a target, not an enabled external delivery pipeline. The event API persists events without creating deliveries or performing fan-out. The implemented local success path is:
+
+1. A caller explicitly invokes `schedule_delivery(event, endpoint)` for an active endpoint. `Ecto.Multi` and `Oban.insert/3` persist a pending delivery and its job in one transaction. `create_delivery/2` still creates only a delivery.
+2. `DeliverWebhookWorker` consumes a job containing only `delivery_id` on the `default` queue, with `max_attempts: 1`. It obtains the adapter from application configuration and delegates to `DeliveryProcessor`.
+3. The processor atomically claims a pending delivery as `processing`, loading its event and endpoint, then encodes an envelope with `id` from `external_id`, `type` from `event_type`, and `data` from the payload.
+4. The processor passes the endpoint URL, serialized body, and `content-type: application/json` to the adapter and measures duration with a monotonic clock. The deterministic adapter returns simulated status 204 and empty headers.
+5. For a 2xx result, finalization records a `succeeded` attempt and updates the delivery status, attempt counter, and completion timestamp atomically.
+
+The worker cancels missing deliveries or missing adapter configuration without retrying. Processor errors after claim leave the delivery in `processing`; failure recording and recovery remain pending. No Req transport or signing is connected to this path.
 
 ## Current and future entities
 
@@ -68,35 +78,42 @@ Current responsibilities:
 
 - requiring event and endpoint associations with a unique database constraint on the pair;
 - starting in `pending` and retaining the initial lifecycle fields;
-- allowing context-level creation for an active endpoint and retrieval by ID or by the event and endpoint pair.
+- allowing context-level creation for an active endpoint and retrieval by ID or by the event and endpoint pair;
+- scheduling a delivery and its job atomically with `schedule_delivery/2`, with job uniqueness by worker and `delivery_id` across all states while the job record exists;
+- atomically claiming only a pending delivery as `processing`;
+- locking a processing delivery during finalization, inserting its attempt, incrementing `attempt_count`, and setting status and `completed_at` in one transaction; invalid attempts roll back the operation.
 
-No API operation creates deliveries automatically. Jobs, lifecycle processing, outbound sending, attempt recording, and retries remain future responsibilities.
+The finalization operation supports `succeeded`, `http_error`, and `transport_error` attempt results, mapping the latter two to a failed delivery. The processor currently invokes finalization only for successful 2xx responses. No API operation creates deliveries automatically. Fan-out, external sending, failure-path recording in the processor, retries, and recovery from `processing` remain future work.
 
 ### Attempt
 
-`Attempt` currently has only the recording contract in ADR 0003. It has no table, schema, context operation, or runtime persistence.
+`Attempt` has an implemented `delivery_attempts` table, schema, and context operations to create, retrieve, and list attempts by increasing attempt number, following ADR 0003.
 
-Future responsibilities:
+Current responsibilities:
 
-- attempt number and start/finish timestamps;
-- HTTP status or normalized transport error;
-- latency;
-- safe response metadata with bounded body capture;
-- signature version and request correlation metadata.
+- linking to a delivery with a unique delivery/attempt-number pair;
+- recording a positive attempt number, UTC start/finish timestamps, and non-negative duration;
+- validating `succeeded`, `http_error`, and `transport_error` results, with HTTP status only when a response exists;
+- allowing only bounded `content_type`, non-negative `content_length`, and bounded `request_id` response metadata;
+- remaining append-only, with no context update or delete operations.
 
-Attempts should be append-only operational evidence. Sensitive headers, secrets, and unbounded response bodies must not be stored.
+The processor records only successful attempts today. Recording its HTTP and transport failure paths remains pending, even though the schema and finalization operation accept those results. Response bodies are not stored. Sensitive headers and secrets must never be persisted; any future body capture requires a separate decision.
 
-## Future code boundaries
+## Current and future code boundaries
 
-`Tidewake.Webhooks` currently manages endpoint, event, and delivery persistence operations. Additional context responsibilities and namespaces may emerge as behavior is implemented:
+`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, atomic claim/finalization, and transactional scheduling. `Envelope` serializes events. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation only. `DeliveryProcessor` coordinates the success path, while `Tidewake.Workers.DeliverWebhookWorker` delegates to it using the configured adapter and one job attempt.
 
-- Tidewake.Projects for ownership and endpoint registration;
-- Tidewake.Webhooks may expand to cover attempt persistence and delivery processing;
-- Tidewake.Security for signing and secret handling;
-- Tidewake.Observability for metrics and audit reporting;
-- Tidewake.Workers for Oban workers and retry orchestration.
+Additional responsibilities and namespaces may emerge as behavior is implemented:
 
-These namespaces are not placeholders. Modules should be introduced only with tested behavior.
+- Tidewake.Projects for ownership;
+- automatic ingestion-to-delivery linkage and fan-out to active endpoints;
+- processor failure recording and recovery of deliveries stuck in `processing`;
+- a Req adapter for external HTTP transport;
+- Tidewake.Security for HMAC signing and secret handling;
+- retry policy and orchestration, after a separate decision;
+- Tidewake.Observability and an operational interface for metrics, history, and audit reporting.
+
+These future namespaces are not placeholders. Modules should be introduced only with tested behavior. The first complete external delivery flow is not finished.
 
 ## Reliability principles
 
