@@ -1,6 +1,6 @@
 defmodule Tidewake.Webhooks.DeliveryProcessor do
   @moduledoc """
-  Processes successful deliveries using a supplied delivery adapter.
+  Processes HTTP delivery outcomes using a supplied delivery adapter.
 
   Returns the finalized delivery and attempt, or a controlled error. Errors
   after claim leave the delivery in processing; recovery is not implemented.
@@ -8,6 +8,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
 
   alias Tidewake.Webhooks
   alias Tidewake.Webhooks.Envelope
+  alias Tidewake.Webhooks.ResponseMetadata
 
   def process(delivery_id, adapter) do
     with {:ok, delivery} <- Webhooks.claim_delivery(delivery_id),
@@ -29,10 +30,29 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
     end
   end
 
-  defp finalize(id, {:ok, %{status: status}}, timing) when status in 200..299 do
-    Webhooks.finalize_delivery(id, Map.merge(timing, %{result: "succeeded", http_status: status}))
+  defp finalize(id, {:ok, %{status: status, headers: headers}}, timing)
+       when is_integer(status) and status in 100..599 and is_list(headers) do
+    if valid_headers?(headers) do
+      Webhooks.finalize_delivery(
+        id,
+        Map.merge(timing, %{
+          result: if(status in 200..299, do: "succeeded", else: "http_error"),
+          http_status: status,
+          response_metadata: ResponseMetadata.extract(headers)
+        })
+      )
+    else
+      {:error, :invalid_adapter_response}
+    end
   end
 
   defp finalize(_id, {:error, reason}, _timing) when is_atom(reason), do: {:error, reason}
-  defp finalize(_id, {:ok, _response}, _timing), do: {:error, :unexpected_http_status}
+  defp finalize(_id, _response, _timing), do: {:error, :invalid_adapter_response}
+
+  defp valid_headers?([]), do: true
+
+  defp valid_headers?([{name, value} | rest]) when is_binary(name) and is_binary(value),
+    do: valid_headers?(rest)
+
+  defp valid_headers?(_headers), do: false
 end
