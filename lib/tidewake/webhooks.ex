@@ -5,8 +5,10 @@ defmodule Tidewake.Webhooks do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Ecto.Multi
   alias Tidewake.Repo
   alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
+  alias Tidewake.Workers.DeliverWebhookWorker
 
   def create_event(attrs) do
     %Event{}
@@ -30,6 +32,17 @@ defmodule Tidewake.Webhooks do
 
   def create_delivery(%Event{}, %Endpoint{active: false}) do
     {:error, :endpoint_inactive}
+  end
+
+  def schedule_delivery(%Event{} = event, %Endpoint{} = endpoint) do
+    Multi.new()
+    |> Multi.run(:delivery, fn _repo, _changes -> create_delivery(event, endpoint) end)
+    |> Oban.insert(:job, fn %{delivery: delivery} ->
+      DeliverWebhookWorker.new(%{"delivery_id" => delivery.id},
+        unique: [fields: [:worker, :args], keys: [:delivery_id], period: :infinity, states: :all]
+      )
+    end)
+    |> Repo.transaction()
   end
 
   def get_delivery(id) do
