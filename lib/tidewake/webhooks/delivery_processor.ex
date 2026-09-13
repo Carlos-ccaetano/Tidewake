@@ -2,8 +2,9 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   @moduledoc """
   Processes HTTP delivery outcomes using a supplied delivery adapter.
 
-  Returns the finalized delivery and attempt, or a controlled error. Errors
-  after claim leave the delivery in processing; recovery is not implemented.
+  Returns the finalized delivery and attempt, or a controlled error. Execution
+  or persistence errors after claim leave the delivery in processing; recovery
+  is not implemented.
   """
 
   alias Tidewake.Webhooks
@@ -46,8 +47,24 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
     end
   end
 
-  defp finalize(_id, {:error, reason}, _timing) when is_atom(reason), do: {:error, reason}
+  defp finalize(id, {:error, reason}, timing) when is_atom(reason) do
+    Webhooks.finalize_delivery(
+      id,
+      Map.merge(timing, %{
+        result: "transport_error",
+        error_type: transport_error_type(reason)
+      })
+    )
+  end
+
   defp finalize(_id, _response, _timing), do: {:error, :invalid_adapter_response}
+
+  defp transport_error_type(:timeout), do: "timeout"
+  defp transport_error_type(:dns_error), do: "dns"
+  defp transport_error_type(:tls_error), do: "tls"
+  defp transport_error_type(:connection_refused), do: "connection"
+  defp transport_error_type(:connection_closed), do: "closed"
+  defp transport_error_type(_reason), do: "unknown"
 
   defp valid_headers?([]), do: true
 
