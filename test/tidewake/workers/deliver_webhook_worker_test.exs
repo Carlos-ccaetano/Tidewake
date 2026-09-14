@@ -1,7 +1,8 @@
 defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
-  use Tidewake.DataCase, async: true
+  use Tidewake.DataCase, async: false
   use Oban.Testing, repo: Tidewake.Repo
 
+  alias Tidewake.FailingDeliveryAdapter
   alias Tidewake.Webhooks
   alias Tidewake.Workers.DeliverWebhookWorker
 
@@ -75,13 +76,80 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert Webhooks.list_attempts(delivery) == []
   end
 
+  test "completes an HTTP failure job without retrying" do
+    configure_delivery_adapter(FailingDeliveryAdapter)
+    delivery = delivery_fixture("/http-error")
+
+    Oban.Testing.with_testing_mode(:inline, fn ->
+      assert {:ok, job} =
+               %{delivery_id: delivery.id}
+               |> DeliverWebhookWorker.new()
+               |> Oban.insert()
+
+      assert job.state == "completed"
+      assert job.attempt == 1
+      assert job.max_attempts == 1
+    end)
+
+    finalized = Webhooks.get_delivery(delivery.id)
+    assert finalized.status == "failed"
+    assert finalized.attempt_count == 1
+    assert [attempt] = Webhooks.list_attempts(delivery)
+    assert attempt.result == "http_error"
+    assert attempt.http_status == 503
+    assert attempt.error_type == nil
+    assert [] = all_enqueued(worker: DeliverWebhookWorker)
+    assert Tidewake.Repo.aggregate(Oban.Job, :count, :id) == 0
+  end
+
+  test "completes a transport failure job without retrying" do
+    configure_delivery_adapter(FailingDeliveryAdapter)
+    delivery = delivery_fixture("/timeout")
+
+    Oban.Testing.with_testing_mode(:inline, fn ->
+      assert {:ok, job} =
+               %{delivery_id: delivery.id}
+               |> DeliverWebhookWorker.new()
+               |> Oban.insert()
+
+      assert job.state == "completed"
+      assert job.attempt == 1
+      assert job.max_attempts == 1
+    end)
+
+    finalized = Webhooks.get_delivery(delivery.id)
+    assert finalized.status == "failed"
+    assert finalized.attempt_count == 1
+    assert [attempt] = Webhooks.list_attempts(delivery)
+    assert attempt.result == "transport_error"
+    assert attempt.http_status == nil
+    assert attempt.error_type == "timeout"
+    assert [] = all_enqueued(worker: DeliverWebhookWorker)
+    assert Tidewake.Repo.aggregate(Oban.Job, :count, :id) == 0
+  end
+
   test "rejects invalid or additional job arguments" do
     for args <- [%{}, %{delivery_id: 0}, %{delivery_id: "1"}, %{delivery_id: 1, body: "secret"}] do
       assert {:cancel, :invalid_args} = perform_job(DeliverWebhookWorker, args)
     end
   end
 
-  defp delivery_fixture do
+  defp configure_delivery_adapter(adapter) do
+    previous_adapter = Application.fetch_env(:tidewake, :delivery_adapter)
+    Application.put_env(:tidewake, :delivery_adapter, adapter)
+
+    on_exit(fn ->
+      case previous_adapter do
+        {:ok, previous_adapter} ->
+          Application.put_env(:tidewake, :delivery_adapter, previous_adapter)
+
+        :error ->
+          Application.delete_env(:tidewake, :delivery_adapter)
+      end
+    end)
+  end
+
+  defp delivery_fixture(path \\ "/webhooks") do
     {:ok, event} =
       Webhooks.create_event(%{
         external_id: "evt_worker",
@@ -92,7 +160,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     {:ok, endpoint} =
       Webhooks.create_endpoint(%{
         name: "Local validation",
-        url: "https://endpoint.invalid/webhooks"
+        url: "https://endpoint.invalid#{path}"
       })
 
     {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
