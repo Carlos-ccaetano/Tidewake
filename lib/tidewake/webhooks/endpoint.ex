@@ -38,7 +38,7 @@ defmodule Tidewake.Webhooks.Endpoint do
 
   defp valid_http_url?(url) do
     case URI.new(url) do
-      {:ok, %URI{scheme: scheme, host: host}}
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil, fragment: nil}}
       when scheme in ["http", "https"] and is_binary(host) ->
         String.trim(host) != ""
 
