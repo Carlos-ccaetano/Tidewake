@@ -75,6 +75,27 @@ defmodule Tidewake.Webhooks.EndpointTest do
       assert "can't be blank" in errors_on(changeset).name
     end
 
+    test "accepts a name with exactly 255 characters" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: String.duplicate("a", 255),
+          url: "https://ironhold.example.com/api/webhooks"
+        })
+
+      assert changeset.valid?
+    end
+
+    test "rejects a name with 256 characters and exposes the field error" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: String.duplicate("a", 256),
+          url: "https://ironhold.example.com/api/webhooks"
+        })
+
+      refute changeset.valid?
+      assert "should be at most 255 character(s)" in errors_on(changeset).name
+    end
+
     test "requires a URL" do
       changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold"})
 
