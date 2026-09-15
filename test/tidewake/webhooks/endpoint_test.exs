@@ -122,6 +122,36 @@ defmodule Tidewake.Webhooks.EndpointTest do
       assert changeset.valid?
     end
 
+    test "accepts a valid hostname with a port and query string" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: "Ironhold",
+          url: "https://ironhold.example.com:8443/api/webhooks?tenant=acme&mode=full"
+        })
+
+      assert changeset.valid?
+    end
+
+    test "rejects a URL containing userinfo credentials" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: "Ironhold",
+          url: "https://user:password@example.com/webhooks"
+        })
+
+      assert "must be a valid HTTP or HTTPS URL" in errors_on(changeset).url
+    end
+
+    test "rejects a URL containing a fragment" do
+      changeset =
+        Endpoint.changeset(%Endpoint{}, %{
+          name: "Ironhold",
+          url: "https://example.com/webhooks#internal"
+        })
+
+      assert "must be a valid HTTP or HTTPS URL" in errors_on(changeset).url
+    end
+
     test "rejects a URL without a scheme" do
       changeset =
         Endpoint.changeset(%Endpoint{}, %{
