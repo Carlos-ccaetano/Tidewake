@@ -16,6 +16,7 @@ defmodule Tidewake.Webhooks.Endpoint do
     |> cast(attrs, [:name, :url, :active])
     |> validate_required([:name, :url])
     |> validate_non_blank_name()
+    |> validate_length(:name, max: 255)
     |> validate_url()
   end
 
