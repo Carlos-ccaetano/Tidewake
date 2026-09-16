@@ -107,6 +107,14 @@ defmodule Tidewake.Webhooks do
     Repo.all(Endpoint)
   end
 
+  def list_active_endpoints do
+    from(endpoint in Endpoint,
+      where: endpoint.active == true,
+      order_by: [asc: endpoint.id]
+    )
+    |> Repo.all()
+  end
+
   def get_endpoint(id) do
     Repo.get(Endpoint, id)
   end
