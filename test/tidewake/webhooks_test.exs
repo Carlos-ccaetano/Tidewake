@@ -426,6 +426,24 @@ defmodule Tidewake.WebhooksTest do
       assert Webhooks.list_endpoints() == [endpoint]
     end
 
+    test "list_active_endpoints/0 returns only active endpoints ordered by ID" do
+      event = event_fixture()
+      first_active = endpoint_fixture(%{name: "First active"})
+      _inactive = endpoint_fixture(%{name: "Inactive", active: false})
+      second_active = endpoint_fixture(%{name: "Second active"})
+
+      assert Webhooks.list_active_endpoints() == [first_active, second_active]
+      assert Webhooks.get_event(event.id) == event
+      assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+
+    test "list_active_endpoints/0 returns an empty list without active endpoints" do
+      _inactive = endpoint_fixture(%{active: false})
+
+      assert Webhooks.list_active_endpoints() == []
+    end
+
     test "get_endpoint/1 returns an existing endpoint" do
       endpoint = endpoint_fixture()
 
