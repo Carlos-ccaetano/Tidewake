@@ -2,9 +2,9 @@
 
 ## Status
 
-This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Atomic delivery claim and finalization, the adapter contract, a deterministic local adapter, JSON envelope encoding, success-path processing, an Oban worker, and atomic delivery/job scheduling through `schedule_delivery/2` are available.
+This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Atomic delivery claim and finalization, the adapter contract, a deterministic local adapter, JSON envelope encoding, success and failure processing, safe response metadata extraction, an Oban worker, and atomic delivery/job scheduling through `schedule_delivery/2` are available.
 
-Automatic linkage from event ingestion to deliveries, fan-out to active endpoints, recording HTTP and transport failure paths in the processor, a Req adapter in use, HMAC signing, retries, recovery of deliveries stuck in `processing`, and an operational interface remain pending. Real external deliveries are not enabled; the deterministic adapter simulates a 204 response without I/O and is configured only for tests.
+The Req adapter is implemented and tested, but it is not activated. The deterministic adapter simulates a 204 response without I/O and remains configured in tests. ADR 0006 defines event fan-out and the context can list active endpoints deterministically, but `POST /api/events` still persists only the event and transactional fan-out is not implemented. Destination protection against SSRF, a hard limit on response bytes actually received, HMAC signing, retries, recovery of deliveries stuck in `processing`, and an operational interface remain pending. Real external deliveries are not enabled.
 
 ## System boundary
 
@@ -30,15 +30,16 @@ Ironhold remains an independent system and repository. Tidewake must not depend 
 8. A transient failure schedules a bounded retry with exponential backoff.
 9. Operators inspect history and status through Phoenix LiveView and telemetry.
 
-The complete flow above remains a target, not an enabled external delivery pipeline. The event API persists events without creating deliveries or performing fan-out. The implemented local success path is:
+The complete flow above remains a target, not an enabled external delivery pipeline. The event API persists events without creating deliveries or performing fan-out. The implemented local delivery path is:
 
 1. A caller explicitly invokes `schedule_delivery(event, endpoint)` for an active endpoint. `Ecto.Multi` and `Oban.insert/3` persist a pending delivery and its job in one transaction. `create_delivery/2` still creates only a delivery.
 2. `DeliverWebhookWorker` consumes a job containing only `delivery_id` on the `default` queue, with `max_attempts: 1`. It obtains the adapter from application configuration and delegates to `DeliveryProcessor`.
 3. The processor atomically claims a pending delivery as `processing`, loading its event and endpoint, then encodes an envelope with `id` from `external_id`, `type` from `event_type`, and `data` from the payload.
-4. The processor passes the endpoint URL, serialized body, and `content-type: application/json` to the adapter and measures duration with a monotonic clock. The deterministic adapter returns simulated status 204 and empty headers.
-5. For a 2xx result, finalization records a `succeeded` attempt and updates the delivery status, attempt counter, and completion timestamp atomically.
+4. The processor passes the endpoint URL, serialized body, and `content-type: application/json` to the configured adapter and measures duration with a monotonic clock. In tests, the deterministic adapter returns simulated status 204 and empty headers.
+5. For any valid adapter outcome, finalization records a `succeeded`, `http_error`, or `transport_error` attempt and updates the delivery status, attempt counter, and completion timestamp atomically. HTTP outcomes include only safe allowlisted response metadata; transport failures use bounded error classifications and no synthetic HTTP status.
+6. Persisted HTTP and transport failures complete the worker job successfully without retrying, while the delivery finishes as `failed` with exactly one attempt.
 
-The worker cancels missing deliveries or missing adapter configuration without retrying. Processor errors after claim leave the delivery in `processing`; failure recording and recovery remain pending. No Req transport or signing is connected to this path.
+The worker cancels missing deliveries or missing adapter configuration without retrying. Execution, malformed-response, or persistence errors after claim can still leave the delivery in `processing`; recovery remains pending. The Req transport exists as an isolated implementation but is not configured in this path, and signing is not implemented.
 
 ## Current and future entities
 
@@ -48,7 +49,8 @@ The implemented `Endpoint` model represents a registered destination. Its curren
 
 - storing a human-readable name, an HTTP or HTTPS target URL, and an active flag;
 - persisting creation and update timestamps;
-- supporting list, retrieve, create, and update operations through `Tidewake.Webhooks` and the HTTP API.
+- supporting list, retrieve, create, and update operations through `Tidewake.Webhooks` and the HTTP API;
+- listing only active endpoints in increasing ID order for the future fan-out transaction.
 
 Future responsibilities may include:
 
@@ -83,7 +85,7 @@ Current responsibilities:
 - atomically claiming only a pending delivery as `processing`;
 - locking a processing delivery during finalization, inserting its attempt, incrementing `attempt_count`, and setting status and `completed_at` in one transaction; invalid attempts roll back the operation.
 
-The finalization operation supports `succeeded`, `http_error`, and `transport_error` attempt results, mapping the latter two to a failed delivery. The processor currently invokes finalization only for successful 2xx responses. No API operation creates deliveries automatically. Fan-out, external sending, failure-path recording in the processor, retries, and recovery from `processing` remain future work.
+The finalization operation and processor support `succeeded`, `http_error`, and `transport_error` attempt results, mapping the latter two to a failed delivery. Safe allowlisted response metadata is extracted for HTTP outcomes, and transport reasons are normalized before persistence. No API operation creates deliveries automatically. ADR 0006 defines the fan-out boundary, but transactional fan-out, external sending, retries, and recovery from `processing` remain future work.
 
 ### Attempt
 
@@ -97,18 +99,18 @@ Current responsibilities:
 - allowing only bounded `content_type`, non-negative `content_length`, and bounded `request_id` response metadata;
 - remaining append-only, with no context update or delete operations.
 
-The processor records only successful attempts today. Recording its HTTP and transport failure paths remains pending, even though the schema and finalization operation accept those results. Response bodies are not stored. Sensitive headers and secrets must never be persisted; any future body capture requires a separate decision.
+The processor records successful, HTTP error, and transport error attempts. `ResponseMetadata` extracts only bounded `content_type`, `content_length`, and `request_id` values from valid HTTP response headers; transport failures carry no response metadata. Response bodies are not stored. Sensitive headers and secrets must never be persisted; a hard limit on the response bytes consumed by the inactive Req transport remains pending.
 
 ## Current and future code boundaries
 
-`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, atomic claim/finalization, and transactional scheduling. `Envelope` serializes events. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation only. `DeliveryProcessor` coordinates the success path, while `Tidewake.Workers.DeliverWebhookWorker` delegates to it using the configured adapter and one job attempt.
+`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, active endpoint lookup, atomic claim/finalization, and transactional scheduling for one delivery. `Envelope` serializes events. `ResponseMetadata` enforces the safe response metadata boundary. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation, while `DeliveryAdapters.Req` implements and tests the inactive real HTTP transport. `DeliveryProcessor` coordinates successful, HTTP error, and transport error outcomes, while `Tidewake.Workers.DeliverWebhookWorker` delegates to it using the configured adapter and one job attempt.
 
 Additional responsibilities and namespaces may emerge as behavior is implemented:
 
 - Tidewake.Projects for ownership;
-- automatic ingestion-to-delivery linkage and fan-out to active endpoints;
-- processor failure recording and recovery of deliveries stuck in `processing`;
-- a Req adapter for external HTTP transport;
+- transactional ingestion-to-delivery linkage and fan-out to active endpoints as defined by ADR 0006;
+- recovery of deliveries stuck in `processing`;
+- SSRF-safe destination validation and a hard response-consumption limit before activating the Req adapter;
 - Tidewake.Security for HMAC signing and secret handling;
 - retry policy and orchestration, after a separate decision;
 - Tidewake.Observability and an operational interface for metrics, history, and audit reporting.
