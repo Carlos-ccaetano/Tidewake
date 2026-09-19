@@ -121,36 +121,71 @@ defmodule Tidewake.WebhooksTest do
 
         refute changeset.valid?
         assert "can't be blank" in errors_on(changeset).external_id
-        assert Repo.aggregate(Tidewake.Webhooks.Event, :count) == 0
-        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
-        assert Repo.aggregate(Oban.Job, :count) == 0
+        assert fanout_record_counts() == %{events: 0, deliveries: 0, jobs: 0}
       end)
     end
 
-    test "returns the uniqueness changeset and creates no fan-out for a duplicate event" do
+    test "a duplicate event preserves the original fan-out and all record counts" do
       Oban.Testing.with_testing_mode(:manual, fn ->
-        existing_event = event_fixture()
-        _endpoint = endpoint_fixture()
+        _first_endpoint = endpoint_fixture(%{name: "First"})
+        _second_endpoint = endpoint_fixture(%{name: "Second"})
+
+        assert {:ok,
+                %{
+                  event: existing_event,
+                  deliveries: existing_deliveries,
+                  jobs: existing_jobs
+                }} = Webhooks.ingest_event(valid_event_attrs())
+
+        counts_before_conflict = fanout_record_counts()
+        delivery_ids_before_conflict = Enum.map(existing_deliveries, & &1.id)
+        job_ids_before_conflict = Enum.map(existing_jobs, & &1.id)
 
         assert {:error, %Changeset{} = changeset} =
                  Webhooks.ingest_event(valid_event_attrs())
 
         refute changeset.valid?
         assert "has already been taken" in errors_on(changeset).external_id
-        assert Repo.all(Tidewake.Webhooks.Event) == [existing_event]
-        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
-        assert Repo.aggregate(Oban.Job, :count) == 0
+        assert fanout_record_counts() == counts_before_conflict
+        assert counts_before_conflict == %{events: 1, deliveries: 2, jobs: 2}
+        assert Webhooks.get_event_by_external_id(existing_event.external_id) == existing_event
+
+        assert Repo.all(Tidewake.Webhooks.Delivery)
+               |> Enum.map(& &1.id)
+               |> Enum.sort() == Enum.sort(delivery_ids_before_conflict)
+
+        assert Repo.all(Oban.Job)
+               |> Enum.map(& &1.id)
+               |> Enum.sort() == Enum.sort(job_ids_before_conflict)
       end)
     end
 
-    test "a rejected job insertion rolls back the event and the complete fan-out" do
+    test "a rejected second job rolls back the event and fan-out for two endpoints" do
       Oban.Testing.with_testing_mode(:manual, fn ->
-        _endpoint = endpoint_fixture()
+        _first_endpoint = endpoint_fixture(%{name: "First"})
+        _second_endpoint = endpoint_fixture(%{name: "Second"})
 
         # Transactional DDL is reverted by the sandbox; these tests run synchronously.
         Repo.query!("""
-        ALTER TABLE oban_jobs ADD CONSTRAINT reject_ingestion_test_job
-        CHECK (worker <> 'Tidewake.Workers.DeliverWebhookWorker')
+        CREATE FUNCTION allow_only_first_ingestion_test_job()
+        RETURNS boolean
+        LANGUAGE sql
+        VOLATILE
+        AS $$
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM oban_jobs
+            WHERE worker = 'Tidewake.Workers.DeliverWebhookWorker'
+          )
+        $$
+        """)
+
+        Repo.query!("""
+        ALTER TABLE oban_jobs ADD CONSTRAINT reject_second_ingestion_test_job
+        CHECK (
+          worker <> 'Tidewake.Workers.DeliverWebhookWorker'
+          OR allow_only_first_ingestion_test_job()
+        )
         """)
 
         assert_raise Ecto.ConstraintError, fn ->
@@ -158,8 +193,7 @@ defmodule Tidewake.WebhooksTest do
         end
 
         assert Webhooks.get_event_by_external_id(valid_event_attrs().external_id) == nil
-        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
-        assert Repo.aggregate(Oban.Job, :count) == 0
+        assert fanout_record_counts() == %{events: 0, deliveries: 0, jobs: 0}
       end)
     end
   end
@@ -639,6 +673,14 @@ defmodule Tidewake.WebhooksTest do
     attrs = Map.merge(valid_attrs(), attrs)
     {:ok, endpoint} = Webhooks.create_endpoint(attrs)
     endpoint
+  end
+
+  defp fanout_record_counts do
+    %{
+      events: Repo.aggregate(Tidewake.Webhooks.Event, :count),
+      deliveries: Repo.aggregate(Tidewake.Webhooks.Delivery, :count),
+      jobs: Repo.aggregate(Oban.Job, :count)
+    }
   end
 
   defp delivery_fixture do
