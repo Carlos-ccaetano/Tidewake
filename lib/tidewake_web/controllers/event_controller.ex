@@ -17,8 +17,8 @@ defmodule TidewakeWeb.EventController do
       payload: params["data"]
     }
 
-    case Webhooks.create_event(attrs) do
-      {:ok, event} ->
+    case Webhooks.ingest_event(attrs) do
+      {:ok, %{event: event, deliveries: _deliveries, jobs: _jobs}} ->
         conn
         |> put_status(:created)
         |> put_resp_header("location", "/api/events/#{event.id}")
