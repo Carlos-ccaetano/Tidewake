@@ -16,6 +16,15 @@ defmodule Tidewake.Webhooks do
     |> Repo.insert()
   end
 
+  def ingest_event(attrs) do
+    Multi.new()
+    |> Multi.insert(:event, Event.changeset(%Event{}, attrs))
+    |> Multi.all(:endpoints, active_endpoints_query())
+    |> Multi.merge(&fanout_multi/1)
+    |> Repo.transaction()
+    |> normalize_ingest_result()
+  end
+
   def get_event(id) do
     Repo.get(Event, id)
   end
@@ -25,8 +34,8 @@ defmodule Tidewake.Webhooks do
   end
 
   def create_delivery(%Event{} = event, %Endpoint{active: true} = endpoint) do
-    %Delivery{event_id: event.id, endpoint_id: endpoint.id}
-    |> Delivery.changeset(%{})
+    event
+    |> delivery_changeset(endpoint)
     |> Repo.insert()
   end
 
@@ -38,9 +47,7 @@ defmodule Tidewake.Webhooks do
     Multi.new()
     |> Multi.run(:delivery, fn _repo, _changes -> create_delivery(event, endpoint) end)
     |> Oban.insert(:job, fn %{delivery: delivery} ->
-      DeliverWebhookWorker.new(%{"delivery_id" => delivery.id},
-        unique: [fields: [:worker, :args], keys: [:delivery_id], period: :infinity, states: :all]
-      )
+      initial_delivery_job(delivery)
     end)
     |> Repo.transaction()
   end
@@ -108,10 +115,7 @@ defmodule Tidewake.Webhooks do
   end
 
   def list_active_endpoints do
-    from(endpoint in Endpoint,
-      where: endpoint.active == true,
-      order_by: [asc: endpoint.id]
-    )
+    active_endpoints_query()
     |> Repo.all()
   end
 
@@ -133,6 +137,51 @@ defmodule Tidewake.Webhooks do
 
   def change_endpoint(%Endpoint{} = endpoint, attrs \\ %{}) do
     Endpoint.changeset(endpoint, attrs)
+  end
+
+  defp active_endpoints_query do
+    from(endpoint in Endpoint,
+      where: endpoint.active == true,
+      order_by: [asc: endpoint.id]
+    )
+  end
+
+  defp fanout_multi(%{event: event, endpoints: endpoints}) do
+    Enum.reduce(endpoints, Multi.new(), fn endpoint, multi ->
+      delivery_operation = {:delivery, endpoint.id}
+      job_operation = {:job, endpoint.id}
+
+      multi
+      |> Multi.insert(delivery_operation, delivery_changeset(event, endpoint))
+      |> Oban.insert(job_operation, fn changes ->
+        changes
+        |> Map.fetch!(delivery_operation)
+        |> initial_delivery_job()
+      end)
+    end)
+  end
+
+  defp normalize_ingest_result({:ok, %{event: event, endpoints: endpoints} = changes}) do
+    deliveries = Enum.map(endpoints, &Map.fetch!(changes, {:delivery, &1.id}))
+    jobs = Enum.map(endpoints, &Map.fetch!(changes, {:job, &1.id}))
+
+    {:ok, %{event: event, deliveries: deliveries, jobs: jobs}}
+  end
+
+  defp normalize_ingest_result({:error, :event, %Ecto.Changeset{} = changeset, _changes}) do
+    {:error, changeset}
+  end
+
+  defp normalize_ingest_result(error), do: error
+
+  defp delivery_changeset(%Event{} = event, %Endpoint{} = endpoint) do
+    Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
+  end
+
+  defp initial_delivery_job(%Delivery{} = delivery) do
+    DeliverWebhookWorker.new(%{"delivery_id" => delivery.id},
+      unique: [fields: [:worker, :args], keys: [:delivery_id], period: :infinity, states: :all]
+    )
   end
 
   defp finalize_processing_delivery(delivery, attrs) do

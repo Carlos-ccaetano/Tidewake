@@ -50,6 +50,120 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "ingest_event/1" do
+    test "persists an event with empty fan-out when there are no active endpoints" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        assert {:ok, %{event: event, deliveries: [], jobs: []}} =
+                 Webhooks.ingest_event(valid_event_attrs())
+
+        assert Webhooks.get_event(event.id) == event
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "persists one pending delivery and one initial job for an active endpoint" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        endpoint = endpoint_fixture()
+
+        assert {:ok, %{event: event, deliveries: [delivery], jobs: [job]}} =
+                 Webhooks.ingest_event(valid_event_attrs())
+
+        assert delivery.event_id == event.id
+        assert delivery.endpoint_id == endpoint.id
+        assert delivery.status == "pending"
+        assert delivery.attempt_count == 0
+        assert job.args == %{"delivery_id" => delivery.id}
+        assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
+        assert job.max_attempts == 1
+        assert job.state == "available"
+        assert Repo.get(Oban.Job, job.id).args == %{"delivery_id" => delivery.id}
+        assert Webhooks.get_delivery(delivery.id) == delivery
+      end)
+    end
+
+    test "fans out to active endpoints in ID order and ignores inactive endpoints" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        first_active = endpoint_fixture(%{name: "First active"})
+        inactive = endpoint_fixture(%{name: "Inactive", active: false})
+        second_active = endpoint_fixture(%{name: "Second active"})
+        third_active = endpoint_fixture(%{name: "Third active"})
+
+        assert {:ok, %{event: event, deliveries: deliveries, jobs: jobs}} =
+                 Webhooks.ingest_event(valid_event_attrs())
+
+        assert Enum.map(deliveries, & &1.endpoint_id) == [
+                 first_active.id,
+                 second_active.id,
+                 third_active.id
+               ]
+
+        assert Enum.all?(deliveries, fn delivery ->
+                 delivery.event_id == event.id and delivery.status == "pending"
+               end)
+
+        assert Enum.map(jobs, & &1.args) ==
+                 Enum.map(deliveries, &%{"delivery_id" => &1.id})
+
+        assert length(deliveries) == 3
+        assert length(jobs) == 3
+        assert Webhooks.get_delivery_by_event_and_endpoint(event, inactive) == nil
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 3
+        assert Repo.aggregate(Oban.Job, :count) == 3
+      end)
+    end
+
+    test "returns a usable changeset and creates no fan-out for an invalid event" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        _endpoint = endpoint_fixture()
+
+        assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(%{})
+
+        refute changeset.valid?
+        assert "can't be blank" in errors_on(changeset).external_id
+        assert Repo.aggregate(Tidewake.Webhooks.Event, :count) == 0
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "returns the uniqueness changeset and creates no fan-out for a duplicate event" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        existing_event = event_fixture()
+        _endpoint = endpoint_fixture()
+
+        assert {:error, %Changeset{} = changeset} =
+                 Webhooks.ingest_event(valid_event_attrs())
+
+        refute changeset.valid?
+        assert "has already been taken" in errors_on(changeset).external_id
+        assert Repo.all(Tidewake.Webhooks.Event) == [existing_event]
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "a rejected job insertion rolls back the event and the complete fan-out" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        _endpoint = endpoint_fixture()
+
+        # Transactional DDL is reverted by the sandbox; these tests run synchronously.
+        Repo.query!("""
+        ALTER TABLE oban_jobs ADD CONSTRAINT reject_ingestion_test_job
+        CHECK (worker <> 'Tidewake.Workers.DeliverWebhookWorker')
+        """)
+
+        assert_raise Ecto.ConstraintError, fn ->
+          Webhooks.ingest_event(valid_event_attrs())
+        end
+
+        assert Webhooks.get_event_by_external_id(valid_event_attrs().external_id) == nil
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+  end
+
   describe "schedule_delivery/2" do
     test "persists a pending delivery and the correct unique job" do
       Oban.Testing.with_testing_mode(:manual, fn ->
