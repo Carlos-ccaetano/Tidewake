@@ -1,24 +1,96 @@
 defmodule TidewakeWeb.EventControllerTest do
-  use TidewakeWeb.ConnCase, async: true
+  use TidewakeWeb.ConnCase, async: false
 
-  alias Tidewake.Webhooks
+  alias Tidewake.{Repo, Webhooks}
 
   describe "POST /api/events" do
-    test "creates and serializes an event from an unwrapped payload", %{conn: conn} do
-      payload = %{
-        "order_id" => "123",
-        "items" => [%{"sku" => "ABC", "quantity" => 2}]
-      }
+    test "creates and serializes an event without active endpoints or jobs", %{conn: conn} do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        payload = %{
+          "order_id" => "123",
+          "items" => [%{"sku" => "ABC", "quantity" => 2}]
+        }
 
-      conn = post(conn, ~p"/api/events", valid_params(%{data: payload}))
+        conn = post(conn, ~p"/api/events", valid_params(%{data: payload}))
 
-      assert %{"data" => data} = json_response(conn, 201)
-      event = Webhooks.get_event(data["id"])
+        assert %{"data" => data} = response = json_response(conn, 201)
+        event = Webhooks.get_event(data["id"])
 
-      assert data == event_data(event)
-      assert event.event_type == "order.created"
-      assert event.payload == payload
-      assert get_resp_header(conn, "location") == [~p"/api/events/#{event.id}"]
+        assert response == %{"data" => event_data(event)}
+        assert event.event_type == "order.created"
+        assert event.payload == payload
+        assert get_resp_header(conn, "location") == [~p"/api/events/#{event.id}"]
+        assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "creates one delivery and one job for each active endpoint", %{conn: conn} do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        first_endpoint = endpoint_fixture(%{name: "First"})
+        second_endpoint = endpoint_fixture(%{name: "Second"})
+
+        conn = post(conn, ~p"/api/events", valid_params(%{}))
+
+        assert %{"data" => data} = json_response(conn, 201)
+        deliveries = Repo.all(Tidewake.Webhooks.Delivery)
+        jobs = Repo.all(Oban.Job)
+
+        assert Enum.sort(Enum.map(deliveries, & &1.endpoint_id)) ==
+                 Enum.sort([first_endpoint.id, second_endpoint.id])
+
+        assert Enum.all?(deliveries, &(&1.event_id == data["id"]))
+
+        assert Enum.sort(Enum.map(jobs, & &1.args["delivery_id"])) ==
+                 Enum.sort(Enum.map(deliveries, & &1.id))
+
+        assert length(deliveries) == 2
+        assert length(jobs) == 2
+      end)
+    end
+
+    test "ignores inactive endpoints during HTTP ingestion", %{conn: conn} do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        active_endpoint = endpoint_fixture(%{name: "Active"})
+        inactive_endpoint = endpoint_fixture(%{name: "Inactive", active: false})
+
+        conn = post(conn, ~p"/api/events", valid_params(%{}))
+
+        assert %{"data" => data} = json_response(conn, 201)
+        assert [delivery] = Repo.all(Tidewake.Webhooks.Delivery)
+        assert [_job] = Repo.all(Oban.Job)
+
+        assert delivery.event_id == data["id"]
+        assert delivery.endpoint_id == active_endpoint.id
+        refute delivery.endpoint_id == inactive_endpoint.id
+      end)
+    end
+
+    test "a duplicate external_id creates no additional deliveries or jobs", %{conn: conn} do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        _endpoint = endpoint_fixture()
+
+        assert {:ok, %{event: original_event}} =
+                 Webhooks.ingest_event(%{
+                   external_id: "evt_123",
+                   event_type: "order.created",
+                   payload: %{"order_id" => "123"}
+                 })
+
+        counts_before_conflict = fanout_record_counts()
+        conn = post(conn, ~p"/api/events", valid_params(%{type: "order.updated"}))
+
+        assert json_response(conn, 409) == %{
+                 "error" => %{
+                   "code" => "external_id_conflict",
+                   "message" => "An event with this external_id already exists"
+                 }
+               }
+
+        assert fanout_record_counts() == counts_before_conflict
+        assert counts_before_conflict == %{events: 1, deliveries: 1, jobs: 1}
+        assert Webhooks.get_event_by_external_id("evt_123") == original_event
+      end)
     end
 
     test "returns public field errors when required fields are missing", %{conn: conn} do
@@ -71,26 +143,6 @@ defmodule TidewakeWeb.EventControllerTest do
                  "type" => ["should be at most 255 character(s)"]
                }
              }
-    end
-
-    test "returns a conflict for a duplicate external_id", %{conn: conn} do
-      {:ok, original_event} =
-        Webhooks.create_event(%{
-          external_id: "evt_123",
-          event_type: "order.created",
-          payload: %{"order_id" => "123"}
-        })
-
-      conn = post(conn, ~p"/api/events", valid_params(%{type: "order.updated"}))
-
-      assert json_response(conn, 409) == %{
-               "error" => %{
-                 "code" => "external_id_conflict",
-                 "message" => "An event with this external_id already exists"
-               }
-             }
-
-      assert Webhooks.get_event_by_external_id("evt_123") == original_event
     end
   end
 
@@ -158,6 +210,25 @@ defmodule TidewakeWeb.EventControllerTest do
       })
 
     event
+  end
+
+  defp endpoint_fixture(attrs \\ %{}) do
+    attrs =
+      Map.merge(
+        %{name: "Endpoint", url: "https://example.com/webhooks"},
+        attrs
+      )
+
+    {:ok, endpoint} = Webhooks.create_endpoint(attrs)
+    endpoint
+  end
+
+  defp fanout_record_counts do
+    %{
+      events: Repo.aggregate(Tidewake.Webhooks.Event, :count),
+      deliveries: Repo.aggregate(Tidewake.Webhooks.Delivery, :count),
+      jobs: Repo.aggregate(Oban.Job, :count)
+    }
   end
 
   defp valid_params(overrides) do
