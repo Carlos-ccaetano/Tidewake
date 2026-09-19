@@ -34,19 +34,21 @@ Implemented:
 - atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
 - an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
 - a deterministic local adapter returning simulated HTTP 204 without external requests;
-- attempt creation in the success path, atomically finalized with the delivery and its counter;
-- the `pending → processing → succeeded` transition, with atomic claim and finalization;
-- tests for transactional scheduling, rollback, and successful processing through the worker.
+- attempt creation for successful responses, HTTP errors, and transport errors, atomically finalized with the delivery and its counter;
+- safe extraction of bounded, allowlisted response metadata without response bodies or secret headers;
+- the `pending → processing → succeeded/failed` transitions, with atomic claim and finalization;
+- tests for transactional scheduling, rollback, and complete success and persisted-failure cycles through the worker;
+- a Req-backed adapter with explicit timeouts, redirects and internal retries disabled, implemented and tested in isolation without activation;
+- deterministic lookup of active endpoints in increasing ID order for future fan-out.
 
 Pending acceptance work:
 
 - authenticate the event API or explicitly restrict it to development;
-- connect event ingestion to fan-out for active endpoints;
-- process and record HTTP and transport failures;
-- test the complete failure cycle through the worker;
+- implement transactional fan-out during event ingestion;
+- connect `POST /api/events` to creation of deliveries and their initial jobs;
 - add telemetry for event acceptance and processing outcomes.
 
-This milestone is not complete. The local success path is available through explicit scheduling, but ingestion does not trigger it automatically. Failure processing and acceptance/processing telemetry remain pending. No real external delivery is enabled, and retry policy remains in Milestone 3.
+This milestone is not complete. Complete local success and failure paths are available through explicit scheduling, but ingestion does not create deliveries or jobs. Transactional fan-out, event API integration, and acceptance/processing telemetry remain pending. No real external delivery is enabled, and retry policy remains in Milestone 3.
 
 ## Milestone 2: endpoints and signed delivery
 
@@ -57,13 +59,14 @@ Completed:
 - endpoint model and persistence, including schema validation and context operations.
 - HTTP management API for endpoint creation, listing, retrieval, and updates, including deactivation with `active: false`.
 
+The Req adapter exists and is tested, but it is not activated as the configured delivery transport.
+
 Planned:
 
 - associate endpoints with projects;
-- deliver with Req using explicit timeouts;
+- implement destination protection against SSRF and a hard bound on response bytes actually received before activating the Req adapter;
 - sign exact request bytes with versioned HMAC headers;
-- integrate external delivery responses with attempt recording and safe response metadata;
-- test signatures and transport classification.
+- test signatures and the safeguards required for activated external transport.
 
 ## Milestone 3: retry and idempotency hardening
 
