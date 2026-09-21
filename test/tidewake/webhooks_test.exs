@@ -300,6 +300,33 @@ defmodule Tidewake.WebhooksTest do
       assert Webhooks.get_delivery(-1) == nil
     end
 
+    test "list_deliveries_for_event/1 returns an empty list without deliveries" do
+      event = event_fixture()
+
+      assert Webhooks.list_deliveries_for_event(event) == []
+      assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+
+    test "list_deliveries_for_event/1 isolates events and orders by delivery ID" do
+      event = event_fixture()
+      other_event = event_fixture(%{external_id: "evt_other"})
+      first_endpoint = endpoint_fixture()
+      second_endpoint = endpoint_fixture(%{name: "Second"})
+
+      {:ok, first_delivery} = Webhooks.create_delivery(event, first_endpoint)
+      {:ok, other_delivery} = Webhooks.create_delivery(other_event, first_endpoint)
+      {:ok, second_delivery} = Webhooks.create_delivery(event, second_endpoint)
+
+      assert first_delivery.id < other_delivery.id
+      assert other_delivery.id < second_delivery.id
+      assert Webhooks.list_deliveries_for_event(event) == [first_delivery, second_delivery]
+      assert Webhooks.list_deliveries_for_event(other_event) == [other_delivery]
+      assert Repo.aggregate(Oban.Job, :count) == 0
+      assert Webhooks.get_delivery(first_delivery.id) == first_delivery
+      assert Webhooks.get_delivery(second_delivery.id) == second_delivery
+    end
+
     test "get_delivery_by_event_and_endpoint/2 returns the matching delivery" do
       event = event_fixture()
       endpoint = endpoint_fixture()
