@@ -2,7 +2,7 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event persistence are implemented through the `Tidewake.Webhooks` context and explicit Phoenix routes. Event ingestion enforces idempotency with a unique database index on the client-provided `external_id`. Authentication, delivery and attempt processing, event jobs, outbound requests with Req, retries, HMAC signing, audit records, and the operational LiveView remain planned and are not implemented.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, pending deliveries for all active endpoints, and their initial Oban jobs; `201 Created` does not mean a webhook was sent or delivered. The worker and processor can record delivery outcomes, and a Req adapter is implemented and tested, but real outbound HTTP remains inactive pending SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. Authentication, retries, HMAC signing, audit records, and the operational LiveView remain pending.
 
 ## Relationship with Ironhold
 
@@ -16,11 +16,9 @@ This repository does not contain or modify Ironhold.
 
     Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
 
-Tidewake currently accepts, persists, and retrieves individual events through its HTTP API. It also manages registered destination endpoints. The broader architecture will eventually:
+Tidewake currently accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. This durable fan-out is not proof of an outbound HTTP delivery. The broader architecture will eventually:
 
-- enqueue asynchronous work with Oban;
 - send signed webhook requests with Req;
-- record attempts, status, latency, and response metadata;
 - retry transient failures with exponential backoff;
 - enforce idempotency at the delivery boundary;
 - expose operational history through Phoenix LiveView;
