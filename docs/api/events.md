@@ -2,15 +2,15 @@
 
 ## Status
 
-Event persistence and the HTTP operations to create and retrieve individual events are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
+Event ingestion and the HTTP operations to create and retrieve individual events are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
 
-No delivery is created, scheduled, or executed when an event is accepted. Delivery, attempts, jobs, outbound requests, signing, and retries remain pending.
+Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. Outbound HTTP activation, signing, and retries remain pending.
 
 ## Operations
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/events` | Validate and persist a new event. |
+| `POST` | `/api/events` | Validate and atomically persist a new event and its initial delivery work. |
 | `GET` | `/api/events/:id` | Retrieve one event by its internal ID. |
 
 ## POST /api/events
@@ -48,9 +48,9 @@ Missing fields, `null` values, empty or whitespace-only strings for `external_id
 
 ### Idempotency and immutability
 
-`external_id` must be unique across accepted events. The `events_external_id_index` unique database index enforces this invariant, including for concurrent requests. A new valid event is persisted before returning `201 Created`.
+`external_id` must be unique across accepted events. The `events_external_id_index` unique database index enforces this invariant, including for concurrent requests. A new valid event and its initial delivery work are committed together before returning `201 Created`.
 
-A subsequent valid request with an existing `external_id` returns `409 Conflict`, whether its `type` and `data` match the original event or differ. It does not create another event, replace the original, or return a second `201 Created`.
+A subsequent valid request with an existing `external_id` returns `409 Conflict`, whether its `type` and `data` match the original event or differ. It does not create another event, replace the original, add deliveries or jobs, or return a second `201 Created`.
 
 An accepted event is an immutable fact. Its `external_id`, `type`, and `data` cannot be updated. Validation failures and conflicts leave stored events unchanged.
 
@@ -58,9 +58,15 @@ An accepted event is an immutable fact. Its `external_id`, `type`, and `data` ca
 
 Responses use `Content-Type: application/json`. Successful responses wrap the accepted event in a top-level `data` object. The nested `data.data` is the client-provided event payload. Error responses follow the `errors` and `error` formats used by the [endpoint management API](endpoints.md).
 
+### Transactional fan-out
+
+Until projects and subscriptions exist, every active endpoint is temporarily eligible for every new event. Inactive endpoints are ignored. For each eligible endpoint, ingestion persists one pending delivery and one initial job. Event, deliveries, and jobs are confirmed in a single transaction; if any insertion fails, none of that ingestion is persisted.
+
+Zero active endpoints is valid: the event is persisted and `201 Created` is returned without deliveries or jobs. Deactivating an endpoint later does not remove work already created for an accepted event.
+
 ### 201 Created
 
-Returned after a new valid event has been persisted. The initial response includes the accepted fields:
+Returned after the new event, all deliveries for currently active endpoints, and their initial jobs have been persisted atomically. The response serializes only the accepted event:
 
 The response includes a `Location: /api/events/:id` header pointing to the retrieval operation.
 
@@ -79,11 +85,11 @@ The response includes a `Location: /api/events/:id` header pointing to the retri
 }
 ```
 
-This response acknowledges event persistence only. It does not indicate that any delivery has occurred.
+`201 Created` acknowledges durable ingestion, not delivery execution. It does not mean a webhook was sent, a delivery succeeded, or a response was received from a consumer.
 
 ### 422 Unprocessable Entity
 
-Returned when the payload fails the validation rules. No event is created. Validation errors are grouped by request field, with arrays of readable messages:
+Returned when the payload fails the validation rules. No event, delivery, or job is created. Validation errors are grouped by request field, with arrays of readable messages:
 
 ```json
 {
@@ -99,7 +105,7 @@ The example shows multiple errors; a response includes the errors applicable to 
 
 ### 409 Conflict
 
-Returned when a valid payload uses an `external_id` that already exists. The original event remains unchanged:
+Returned when a valid payload uses an `external_id` that already exists. The original event remains unchanged; no new deliveries or jobs are added:
 
 ```json
 {
@@ -150,13 +156,12 @@ Returned when the internal ID does not exist or the path value is invalid, negat
 
 ## Out of scope
 
-- Destination endpoint operations or associations.
-- `Delivery` and `Attempt` entities.
-- Oban jobs or scheduling.
-- Outbound HTTP requests with Req.
+- Endpoint management operations, documented separately in the [endpoint management API](endpoints.md).
+- Delivery and attempt management through this API; the response exposes only the event.
+- Activation of outbound HTTP requests with Req.
 - HMAC signing.
 - Retries and backoff.
 - Authentication and authorization.
 - Event listing, updates, and deletion.
 
-These capabilities require separate work. The implemented ingestion and retrieval operations do not complete the broader delivery workflow described in the architecture and roadmap.
+These capabilities require separate work. Durable ingestion does not complete the broader delivery workflow described in the architecture and roadmap.
