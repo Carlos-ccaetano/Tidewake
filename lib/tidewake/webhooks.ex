@@ -56,6 +56,14 @@ defmodule Tidewake.Webhooks do
     Repo.get(Delivery, id)
   end
 
+  def list_deliveries_for_event(%Event{} = event) do
+    from(delivery in Delivery,
+      where: delivery.event_id == ^event.id,
+      order_by: [asc: delivery.id]
+    )
+    |> Repo.all()
+  end
+
   def get_delivery_by_event_and_endpoint(%Event{} = event, %Endpoint{} = endpoint) do
     Repo.get_by(Delivery, event_id: event.id, endpoint_id: endpoint.id)
   end
