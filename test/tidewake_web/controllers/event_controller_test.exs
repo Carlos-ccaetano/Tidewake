@@ -181,6 +181,77 @@ defmodule TidewakeWeb.EventControllerTest do
     end
   end
 
+  describe "GET /api/events/:id/deliveries" do
+    test "returns an empty list for an existing event without deliveries", %{conn: conn} do
+      event = event_fixture()
+
+      conn = get(conn, ~p"/api/events/#{event.id}/deliveries")
+
+      assert json_response(conn, 200) == %{"data" => []}
+      assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+
+    test "returns only the event deliveries ordered by ID with the public fields", %{conn: conn} do
+      event = event_fixture()
+      other_event = event_fixture(%{external_id: "evt_other"})
+      first_endpoint = endpoint_fixture(%{name: "First"})
+      second_endpoint = endpoint_fixture(%{name: "Second"})
+
+      {:ok, first_delivery} = Webhooks.create_delivery(event, first_endpoint)
+      {:ok, _other_delivery} = Webhooks.create_delivery(other_event, first_endpoint)
+      {:ok, second_delivery} = Webhooks.create_delivery(event, second_endpoint)
+      {:ok, _claimed_delivery} = Webhooks.claim_delivery(first_delivery.id)
+
+      assert {:ok, %{delivery: finalized_delivery, attempt: attempt}} =
+               Webhooks.finalize_delivery(first_delivery.id, %{
+                 result: "succeeded",
+                 http_status: 200,
+                 duration_ms: 15,
+                 started_at: ~U[2026-09-17 10:00:00.000000Z],
+                 completed_at: ~U[2026-09-17 10:00:00.015000Z],
+                 response_metadata: %{}
+               })
+
+      deliveries_before = [finalized_delivery, second_delivery]
+      job_count_before = Repo.aggregate(Oban.Job, :count)
+      attempt_count_before = Repo.aggregate(Tidewake.Webhooks.Attempt, :count)
+
+      conn = get(conn, ~p"/api/events/#{event.id}/deliveries")
+
+      assert %{"data" => data} = json_response(conn, 200)
+      assert data == Enum.map(deliveries_before, &delivery_data/1)
+      assert Enum.map(data, & &1["id"]) == [finalized_delivery.id, second_delivery.id]
+
+      assert Map.keys(hd(data)) |> Enum.sort() ==
+               ~w(attempt_count completed_at endpoint_id id inserted_at next_attempt_at status updated_at)
+
+      refute Map.has_key?(hd(data), "url")
+      refute Map.has_key?(hd(data), "payload")
+      refute Map.has_key?(hd(data), "attempts")
+      assert hd(data)["completed_at"] == "2026-09-17T10:00:00.015000Z"
+      assert List.last(data)["completed_at"] == nil
+      assert Webhooks.list_deliveries_for_event(event) == deliveries_before
+      assert Repo.aggregate(Oban.Job, :count) == job_count_before
+      assert Repo.aggregate(Tidewake.Webhooks.Attempt, :count) == attempt_count_before
+      assert Webhooks.get_attempt(attempt.id) == attempt
+    end
+
+    test "returns the event not found response for an unknown event", %{conn: conn} do
+      conn = get(conn, ~p"/api/events/999999999/deliveries")
+
+      assert_not_found(conn)
+    end
+
+    test "returns the event not found response for invalid IDs", %{conn: conn} do
+      for id <- ["not-an-id", "0", "-1"] do
+        request_conn = get(recycle(conn), "/api/events/#{id}/deliveries")
+
+        assert_not_found(request_conn)
+      end
+    end
+  end
+
   describe "unsupported event routes" do
     test "does not expose event listing", %{conn: conn} do
       conn = get(conn, ~p"/api/events")
@@ -201,14 +272,18 @@ defmodule TidewakeWeb.EventControllerTest do
     end
   end
 
-  defp event_fixture do
-    {:ok, event} =
-      Webhooks.create_event(%{
-        external_id: "evt_123",
-        event_type: "order.created",
-        payload: %{"order_id" => "123"}
-      })
+  defp event_fixture(attrs \\ %{}) do
+    attrs =
+      Map.merge(
+        %{
+          external_id: "evt_123",
+          event_type: "order.created",
+          payload: %{"order_id" => "123"}
+        },
+        attrs
+      )
 
+    {:ok, event} = Webhooks.create_event(attrs)
     event
   end
 
@@ -229,6 +304,25 @@ defmodule TidewakeWeb.EventControllerTest do
       deliveries: Repo.aggregate(Tidewake.Webhooks.Delivery, :count),
       jobs: Repo.aggregate(Oban.Job, :count)
     }
+  end
+
+  defp delivery_data(delivery) do
+    %{
+      "id" => delivery.id,
+      "endpoint_id" => delivery.endpoint_id,
+      "status" => delivery.status,
+      "attempt_count" => delivery.attempt_count,
+      "next_attempt_at" => timestamp_data(delivery.next_attempt_at),
+      "completed_at" => timestamp_data(delivery.completed_at),
+      "inserted_at" => timestamp_data(delivery.inserted_at),
+      "updated_at" => timestamp_data(delivery.updated_at)
+    }
+  end
+
+  defp timestamp_data(nil), do: nil
+
+  defp timestamp_data(timestamp) do
+    DateTime.to_iso8601(timestamp)
   end
 
   defp valid_params(overrides) do

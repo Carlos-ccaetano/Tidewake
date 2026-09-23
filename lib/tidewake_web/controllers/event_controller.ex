@@ -10,6 +10,17 @@ defmodule TidewakeWeb.EventController do
     end
   end
 
+  def deliveries(conn, %{"id" => id}) do
+    case fetch_event(id) do
+      {:ok, event} ->
+        deliveries = Enum.map(Webhooks.list_deliveries_for_event(event), &delivery_data/1)
+        json(conn, %{data: deliveries})
+
+      :error ->
+        not_found(conn)
+    end
+  end
+
   def create(conn, params) do
     attrs = %{
       external_id: params["external_id"],
@@ -42,6 +53,25 @@ defmodule TidewakeWeb.EventController do
       inserted_at: DateTime.to_iso8601(event.inserted_at),
       updated_at: DateTime.to_iso8601(event.updated_at)
     }
+  end
+
+  defp delivery_data(delivery) do
+    %{
+      id: delivery.id,
+      endpoint_id: delivery.endpoint_id,
+      status: delivery.status,
+      attempt_count: delivery.attempt_count,
+      next_attempt_at: timestamp_data(delivery.next_attempt_at),
+      completed_at: timestamp_data(delivery.completed_at),
+      inserted_at: timestamp_data(delivery.inserted_at),
+      updated_at: timestamp_data(delivery.updated_at)
+    }
+  end
+
+  defp timestamp_data(nil), do: nil
+
+  defp timestamp_data(timestamp) do
+    DateTime.to_iso8601(timestamp)
   end
 
   defp fetch_event(id) do
