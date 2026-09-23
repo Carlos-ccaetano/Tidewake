@@ -32,6 +32,7 @@ defmodule TidewakeWeb.Router do
 
     post "/events", EventController, :create
     get "/events/:id", EventController, :show
+    get "/events/:id/deliveries", EventController, :deliveries
     post "/endpoints", EndpointController, :create
     get "/endpoints", EndpointController, :index
     get "/endpoints/:id", EndpointController, :show
