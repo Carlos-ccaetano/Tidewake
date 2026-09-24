@@ -11,7 +11,19 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   alias Tidewake.Webhooks.Envelope
   alias Tidewake.Webhooks.ResponseMetadata
 
+  @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
+  @delivery_error [:tidewake, :webhooks, :delivery, :error]
+  @outcomes ~w(succeeded http_error transport_error)
+
   def process(delivery_id, adapter) do
+    started = System.monotonic_time(:millisecond)
+    result = process_delivery(delivery_id, adapter)
+    duration_ms = System.monotonic_time(:millisecond) - started
+
+    emit_processing_telemetry(result, duration_ms)
+  end
+
+  defp process_delivery(delivery_id, adapter) do
     with {:ok, delivery} <- Webhooks.claim_delivery(delivery_id),
          {:ok, body} <- Envelope.encode(delivery.event) do
       started_at = DateTime.utc_now()
@@ -58,6 +70,39 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   end
 
   defp finalize(_id, _response, _timing), do: {:error, :invalid_adapter_response}
+
+  defp emit_processing_telemetry(
+         {:ok, %{attempt: %{result: outcome}}} = result,
+         duration_ms
+       )
+       when outcome in @outcomes do
+    :telemetry.execute(
+      @delivery_processed,
+      %{count: 1, duration_ms: duration_ms},
+      %{outcome: outcome}
+    )
+
+    result
+  end
+
+  defp emit_processing_telemetry({:error, reason} = result, duration_ms) do
+    :telemetry.execute(
+      @delivery_error,
+      %{count: 1, duration_ms: duration_ms},
+      %{reason: processing_error_reason(reason)}
+    )
+
+    result
+  end
+
+  defp emit_processing_telemetry(result, _duration_ms), do: result
+
+  defp processing_error_reason(:not_found), do: "not_found"
+  defp processing_error_reason(:invalid_transition), do: "invalid_transition"
+  defp processing_error_reason(:invalid_adapter_response), do: "invalid_adapter_response"
+  defp processing_error_reason(:invalid_json), do: "encoding"
+  defp processing_error_reason(%Ecto.Changeset{}), do: "persistence"
+  defp processing_error_reason(_reason), do: "unknown"
 
   defp transport_error_type(:timeout), do: "timeout"
   defp transport_error_type(:dns_error), do: "dns"
