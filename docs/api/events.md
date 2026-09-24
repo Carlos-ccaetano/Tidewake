@@ -2,7 +2,7 @@
 
 ## Status
 
-Event ingestion and the HTTP operations to create and retrieve individual events are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
+Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
 
 Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. Outbound HTTP activation, signing, and retries remain pending.
 
@@ -12,6 +12,7 @@ Ingestion atomically persists the event, one pending delivery for each active en
 | --- | --- | --- |
 | `POST` | `/api/events` | Validate and atomically persist a new event and its initial delivery work. |
 | `GET` | `/api/events/:id` | Retrieve one event by its internal ID. |
+| `GET` | `/api/events/:id/deliveries` | List the persisted delivery status records for one event. |
 
 ## POST /api/events
 
@@ -154,10 +155,71 @@ Returned when the internal ID does not exist or the path value is invalid, negat
 }
 ```
 
+## GET /api/events/:id/deliveries
+
+Lists the deliveries created for an event, identified by its positive integer internal ID. This is a read-only view of persisted delivery state. It does not send a webhook, execute external delivery, create attempts, or trigger retries.
+
+### 200 OK
+
+Returns deliveries ordered by increasing delivery ID under the top-level `data` key:
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "endpoint_id": 2,
+      "status": "pending",
+      "attempt_count": 0,
+      "next_attempt_at": null,
+      "completed_at": null,
+      "inserted_at": "2026-09-17T10:00:00.000000Z",
+      "updated_at": "2026-09-17T10:00:00.000000Z"
+    }
+  ]
+}
+```
+
+Each delivery contains exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Internal delivery ID. |
+| `endpoint_id` | Internal ID of the destination endpoint, without exposing its configuration. |
+| `status` | Current persisted delivery state, such as `pending`, `processing`, `succeeded`, or `failed`. `pending` does not mean that a webhook was sent. |
+| `attempt_count` | Number of processing attempts persisted for the delivery. |
+| `next_attempt_at` | Scheduled time for a future attempt as a UTC ISO 8601 string, or `null` when absent. Retries are not implemented at this stage. |
+| `completed_at` | Completion time as a UTC ISO 8601 string, or `null` while incomplete. |
+| `inserted_at` | Creation time as a UTC ISO 8601 string. |
+| `updated_at` | Last update time as a UTC ISO 8601 string. |
+
+An existing event without deliveries returns `200 OK` with an empty list:
+
+```json
+{
+  "data": []
+}
+```
+
+The response deliberately excludes endpoint URLs, event payloads, attempts, request and response headers, response bodies, secrets, raw transport errors, and embedded endpoint or event objects. Attempt retrieval and pagination are not available in this stage.
+
+### 404 Not Found
+
+Returned when the event does not exist or the path value is invalid, negative, or zero. It uses the same event error representation as `GET /api/events/:id`:
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Event not found"
+  }
+}
+```
+
 ## Out of scope
 
 - Endpoint management operations, documented separately in the [endpoint management API](endpoints.md).
-- Delivery and attempt management through this API; the response exposes only the event.
+- Delivery mutation and attempt retrieval through this API; only delivery status listing is available.
 - Activation of outbound HTTP requests with Req.
 - HMAC signing.
 - Retries and backoff.
