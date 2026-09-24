@@ -21,6 +21,21 @@ defmodule TidewakeWeb.Telemetry do
 
   def metrics do
     [
+      # Webhook Domain Metrics
+      counter("tidewake.webhooks.event.ingested.count"),
+      sum("tidewake.webhooks.event.ingested.delivery_count"),
+      counter("tidewake.webhooks.event.rejected.count", tags: [:reason]),
+      counter("tidewake.webhooks.delivery.processed.count", tags: [:outcome]),
+      summary("tidewake.webhooks.delivery.processed.duration_ms",
+        tags: [:outcome],
+        unit: :millisecond
+      ),
+      counter("tidewake.webhooks.delivery.error.count", tags: [:reason]),
+      summary("tidewake.webhooks.delivery.error.duration_ms",
+        tags: [:reason],
+        unit: :millisecond
+      ),
+
       # Phoenix Metrics
       summary("phoenix.endpoint.start.system_time",
         unit: {:native, :millisecond}
