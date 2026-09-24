@@ -1,5 +1,8 @@
 defmodule Tidewake.Webhooks.DeliveryProcessorTest do
-  use Tidewake.DataCase, async: true
+  use Tidewake.DataCase, async: false
+
+  @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
+  @delivery_error [:tidewake, :webhooks, :delivery, :error]
 
   alias Tidewake.Webhooks
   alias Tidewake.Webhooks.DeliveryAdapters.Deterministic
@@ -11,6 +14,115 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   def deliver(url, body, headers) do
     send(self(), {:delivered, url, body, headers})
     Process.get(:adapter_response, {:ok, %{status: 204, headers: [{"set-cookie", "secret"}]}})
+  end
+
+  describe "telemetry" do
+    for {label, response, outcome} <- [
+          {"success", {:ok, %{status: 204, headers: [{"set-cookie", "header-secret"}]}},
+           "succeeded"},
+          {"HTTP error",
+           {:ok,
+            %{
+              status: 503,
+              headers: [
+                {"x-request-id", "secret-request-id"},
+                {"authorization", "Bearer secret"}
+              ],
+              body: "secret-response-body"
+            }}, "http_error"},
+          {"transport error", {:error, :internal_adapter_detail}, "transport_error"}
+        ] do
+      test "emits processed with a safe #{label} outcome after finalization" do
+        attach_telemetry(@delivery_processed)
+        attach_telemetry(@delivery_error)
+
+        response = unquote(Macro.escape(response))
+        outcome = unquote(outcome)
+        delivery = delivery_fixture()
+        Process.put(:adapter_response, response)
+
+        assert {:ok, %{delivery: finalized, attempt: attempt}} =
+                 DeliveryProcessor.process(delivery.id, __MODULE__)
+
+        assert attempt.result == outcome
+        assert Webhooks.get_delivery(delivery.id) == finalized
+        assert Webhooks.list_attempts(delivery) == [attempt]
+
+        assert_received {:telemetry_event, @delivery_processed,
+                         %{count: 1, duration_ms: duration_ms} = measurements,
+                         %{outcome: ^outcome} = metadata}
+
+        assert is_integer(duration_ms)
+        assert duration_ms >= 0
+        assert Map.keys(measurements) |> Enum.sort() == [:count, :duration_ms]
+        assert Map.keys(metadata) == [:outcome]
+
+        telemetry_data = inspect({measurements, metadata})
+        refute Map.has_key?(measurements, :delivery_id)
+        refute Map.has_key?(metadata, :delivery_id)
+        refute telemetry_data =~ "endpoint.invalid"
+        refute telemetry_data =~ "evt_processor"
+        refute telemetry_data =~ "header-secret"
+        refute telemetry_data =~ "secret-request-id"
+        refute telemetry_data =~ "secret-response-body"
+        refute telemetry_data =~ "internal_adapter_detail"
+        refute_received {:telemetry_event, @delivery_error, _, _}
+      end
+    end
+
+    test "emits a bounded not_found error and preserves the return" do
+      attach_telemetry(@delivery_processed)
+      attach_telemetry(@delivery_error)
+
+      assert {:error, :not_found} = DeliveryProcessor.process(-1, __MODULE__)
+
+      assert_received {:telemetry_event, @delivery_error, %{count: 1, duration_ms: duration_ms},
+                       %{reason: "not_found"}}
+
+      assert is_integer(duration_ms)
+      assert duration_ms >= 0
+      refute_received {:telemetry_event, @delivery_processed, _, _}
+      refute_received {:delivered, _, _, _}
+    end
+
+    test "emits a bounded invalid_transition error and preserves the return" do
+      delivery = delivery_fixture()
+      assert {:ok, _result} = DeliveryProcessor.process(delivery.id, Deterministic)
+
+      attach_telemetry(@delivery_processed)
+      attach_telemetry(@delivery_error)
+
+      assert {:error, :invalid_transition} =
+               DeliveryProcessor.process(delivery.id, __MODULE__)
+
+      assert_received {:telemetry_event, @delivery_error, %{count: 1, duration_ms: duration_ms},
+                       %{reason: "invalid_transition"}}
+
+      assert is_integer(duration_ms)
+      assert duration_ms >= 0
+      refute_received {:telemetry_event, @delivery_processed, _, _}
+      refute_received {:delivered, _, _, _}
+    end
+
+    test "normalizes a malformed adapter response without exposing its raw error" do
+      attach_telemetry(@delivery_processed)
+      attach_telemetry(@delivery_error)
+
+      delivery = delivery_fixture()
+      Process.put(:adapter_response, {:error, "raw-secret-error"})
+
+      assert {:error, :invalid_adapter_response} =
+               DeliveryProcessor.process(delivery.id, __MODULE__)
+
+      assert_received {:telemetry_event, @delivery_error,
+                       %{count: 1, duration_ms: duration_ms} = measurements,
+                       %{reason: "invalid_adapter_response"} = metadata}
+
+      assert is_integer(duration_ms)
+      assert duration_ms >= 0
+      refute inspect({measurements, metadata}) =~ "raw-secret-error"
+      refute_received {:telemetry_event, @delivery_processed, _, _}
+    end
   end
 
   test "processes a deterministic delivery and persists its successful attempt" do
@@ -245,6 +357,9 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   end
 
   test "returns a changeset error when transport failure finalization cannot insert the attempt" do
+    attach_telemetry(@delivery_processed)
+    attach_telemetry(@delivery_error)
+
     delivery = delivery_fixture()
     timestamp = DateTime.utc_now()
 
@@ -267,6 +382,32 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert persisted.attempt_count == 0
     assert persisted.completed_at == nil
     assert Webhooks.list_attempts(delivery) == [existing_attempt]
+
+    assert_received {:telemetry_event, @delivery_error, %{count: 1, duration_ms: duration_ms},
+                     %{reason: "persistence"}}
+
+    assert is_integer(duration_ms)
+    assert duration_ms >= 0
+    refute_received {:telemetry_event, @delivery_processed, _, _}
+  end
+
+  @doc false
+  def handle_telemetry(event_name, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry_event, event_name, measurements, metadata})
+  end
+
+  defp attach_telemetry(event_name) do
+    handler_id = {__MODULE__, event_name, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        event_name,
+        &__MODULE__.handle_telemetry/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 
   defp delivery_fixture do
