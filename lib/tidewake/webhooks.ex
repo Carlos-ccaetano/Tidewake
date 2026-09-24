@@ -10,6 +10,9 @@ defmodule Tidewake.Webhooks do
   alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
   alias Tidewake.Workers.DeliverWebhookWorker
 
+  @event_ingested [:tidewake, :webhooks, :event, :ingested]
+  @event_rejected [:tidewake, :webhooks, :event, :rejected]
+
   def create_event(attrs) do
     %Event{}
     |> Event.changeset(attrs)
@@ -23,6 +26,7 @@ defmodule Tidewake.Webhooks do
     |> Multi.merge(&fanout_multi/1)
     |> Repo.transaction()
     |> normalize_ingest_result()
+    |> emit_ingest_telemetry()
   end
 
   def get_event(id) do
@@ -181,6 +185,37 @@ defmodule Tidewake.Webhooks do
   end
 
   defp normalize_ingest_result(error), do: error
+
+  defp emit_ingest_telemetry({:ok, %{deliveries: deliveries}} = result) do
+    :telemetry.execute(
+      @event_ingested,
+      %{count: 1, delivery_count: length(deliveries)},
+      %{}
+    )
+
+    result
+  end
+
+  defp emit_ingest_telemetry({:error, %Ecto.Changeset{} = changeset} = result) do
+    :telemetry.execute(
+      @event_rejected,
+      %{count: 1},
+      %{reason: ingest_rejection_reason(changeset)}
+    )
+
+    result
+  end
+
+  defp emit_ingest_telemetry(result), do: result
+
+  defp ingest_rejection_reason(changeset) do
+    if Enum.any?(changeset.errors, &external_id_conflict?/1), do: "conflict", else: "validation"
+  end
+
+  defp external_id_conflict?({:external_id, {_message, options}}),
+    do: options[:constraint] == :unique
+
+  defp external_id_conflict?(_error), do: false
 
   defp delivery_changeset(%Event{} = event, %Endpoint{} = endpoint) do
     Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
