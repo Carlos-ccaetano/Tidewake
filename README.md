@@ -2,7 +2,9 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, pending deliveries for all active endpoints, and their initial Oban jobs; `201 Created` does not mean a webhook was sent or delivered. The worker and processor can record delivery outcomes, and a Req adapter is implemented and tested, but real outbound HTTP remains inactive pending SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. Authentication, retries, HMAC signing, audit records, and the operational LiveView remain pending.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` does not mean a webhook was sent or delivered. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. The worker and processor record local delivery outcomes, bounded Telemetry events cover ingestion and processing, and declarative domain metrics are available.
+
+The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. A policy for endpoints disabled after scheduling, authentication, retries and backoff, HMAC signing, recovery of deliveries stuck in `processing`, audit records, and the operational LiveView remain pending.
 
 ## Relationship with Ironhold
 
@@ -22,7 +24,8 @@ Tidewake currently accepts and retrieves individual events through its HTTP API,
 - retry transient failures with exponential backoff;
 - enforce idempotency at the delivery boundary;
 - expose operational history through Phoenix LiveView;
-- emit logs, metrics, and basic audit information.
+- publish the available domain metrics through a reporter;
+- emit structured logs and basic audit information.
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
@@ -81,7 +84,7 @@ The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api
       -H 'content-type: application/json' \
       -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 
-The event API supports `POST /api/events` and `GET /api/events/:id`. Event listing, updates, and deletion are not implemented.
+The event API supports `POST /api/events`, `GET /api/events/:id`, and `GET /api/events/:id/deliveries`. Event listing, updates, deletion, and attempt detail are not implemented.
 
 Authentication is not implemented yet, so do not expose this API to untrusted networks.
 
@@ -133,7 +136,7 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint and event persistence lives in `Tidewake.Webhooks`. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, and transactional fan-out persistence lives in `Tidewake.Webhooks`. Ingestion and processing emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
