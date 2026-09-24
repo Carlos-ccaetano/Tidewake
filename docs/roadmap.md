@@ -28,9 +28,10 @@ Implemented:
 
 - schemas, context operations, and database persistence for events, deliveries, and attempts;
 - a database-enforced unique index on `external_id` as the ingestion idempotency key;
-- `POST /api/events` for validation and persistence;
+- `POST /api/events` for validation and atomic persistence of the event, its fan-out deliveries, and initial jobs;
 - `GET /api/events/:id` for individual event retrieval;
-- tests for event validation, persistence, duplicate ingestion, and the implemented HTTP operations;
+- `GET /api/events/:id/deliveries` for the event's ordered delivery status without endpoint configuration, payloads, or attempts;
+- tests for event validation, persistence, duplicate ingestion, rollback boundaries, fan-out, and the implemented HTTP operations;
 - atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
 - an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
 - a deterministic local adapter returning simulated HTTP 204 without external requests;
@@ -39,16 +40,17 @@ Implemented:
 - the `pending → processing → succeeded/failed` transitions, with atomic claim and finalization;
 - tests for transactional scheduling, rollback, and complete success and persisted-failure cycles through the worker;
 - a Req-backed adapter with explicit timeouts, redirects and internal retries disabled, implemented and tested in isolation without activation;
-- deterministic lookup of active endpoints in increasing ID order for future fan-out.
+- transactional fan-out to active endpoints in increasing ID order, creating one delivery and one initial job per destination;
+- bounded Telemetry events for confirmed ingestion, rejection, delivery processing, and controlled processing errors;
+- declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, and controlled error reasons and duration.
 
 Pending acceptance work:
 
 - authenticate the event API or explicitly restrict it to development;
-- implement transactional fan-out during event ingestion;
-- connect `POST /api/events` to creation of deliveries and their initial jobs;
-- add telemetry for event acceptance and processing outcomes.
+- define and enforce the delivery-time policy for an endpoint disabled after its job was scheduled;
+- recover deliveries left in `processing` after execution, malformed-response, or persistence failures.
 
-This milestone is not complete. Complete local success and failure paths are available through explicit scheduling, but ingestion does not create deliveries or jobs. Transactional fan-out, event API integration, and acceptance/processing telemetry remain pending. No real external delivery is enabled, and retry policy remains in Milestone 3.
+This milestone is not complete. Transactional ingestion, fan-out, status visibility, and bounded observability are implemented, but authentication, delivery-time handling for endpoints disabled after scheduling, and recovery of deliveries stuck in `processing` remain acceptance gaps. No real external delivery is enabled, and retries and backoff remain in Milestone 3.
 
 ## Milestone 2: endpoints and signed delivery
 
@@ -64,7 +66,8 @@ The Req adapter exists and is tested, but it is not activated as the configured 
 Planned:
 
 - associate endpoints with projects;
-- implement destination protection against SSRF and a hard bound on response bytes actually received before activating the Req adapter;
+- implement complete destination protection against SSRF and a hard bound on response bytes actually received;
+- activate the Req adapter only after those safeguards exist;
 - sign exact request bytes with versioned HMAC headers;
 - test signatures and the safeguards required for activated external transport.
 
@@ -81,7 +84,7 @@ Planned:
 - LiveView event and delivery history;
 - filters for state, endpoint, and time range;
 - attempt detail without secret or payload leakage;
-- queue, latency, outcome, and retry metrics;
+- a reporter and operational views for the available domain metrics, plus queue, latency, and retry metrics;
 - structured logs and basic administrative audit history.
 
 ## Milestone 5: production readiness
