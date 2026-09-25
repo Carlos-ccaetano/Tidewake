@@ -4,7 +4,9 @@
 
 Endpoint persistence and the endpoint management HTTP API are implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema persist endpoint data, while the `Tidewake.Webhooks` context and HTTP controller provide operations to list, retrieve, create, and update endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
 
-The HTTP API does not require authentication yet. Webhook delivery has not been implemented.
+Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint, and its worker and processor support deterministic local processing, persisted attempts and local results, and Telemetry.
+
+A Req-based adapter is implemented, but it is not configured as the active transport. Tidewake therefore does not perform external HTTP webhook delivery in production yet. The HTTP API also does not require authentication yet.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -219,11 +221,13 @@ Error responses must not expose database details or stack traces.
 The following capabilities remain outside the current implementation:
 
 - authentication or authorization;
-- webhook delivery;
+- production activation and configuration of external HTTP webhook delivery through the Req adapter;
+- SSRF protection for outbound destinations;
+- enforcement of a real response-body byte limit;
 - HMAC signing;
-- Oban jobs;
-- retries and backoff;
-- delivery attempts;
+- retry and backoff policies;
+- recovery for interrupted or stranded delivery processing;
+- a policy for deliveries already scheduled when an endpoint is deactivated; deactivation prevents the endpoint from participating in new fan-outs, but does not yet define how those scheduled deliveries are handled;
 - pagination;
 - advanced filtering;
 - endpoint health checks;
