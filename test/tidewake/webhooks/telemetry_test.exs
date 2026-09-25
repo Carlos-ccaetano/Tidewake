@@ -78,7 +78,7 @@ defmodule Tidewake.Webhooks.TelemetryTest do
       refute_received {:telemetry_event, @event_ingested, _, _}
     end
 
-    test "emits rejected with conflict without another success event" do
+    test "emits rejected with duplicate_external_id without another success event" do
       Oban.Testing.with_testing_mode(:manual, fn ->
         attrs = valid_event_attrs()
         assert {:ok, original_result} = Webhooks.ingest_event(attrs)
@@ -91,7 +91,8 @@ defmodule Tidewake.Webhooks.TelemetryTest do
         refute changeset.valid?
         assert Webhooks.get_event_by_external_id(attrs.external_id) == original_result.event
 
-        assert_received {:telemetry_event, @event_rejected, %{count: 1}, %{reason: "conflict"}}
+        assert_received {:telemetry_event, @event_rejected, %{count: 1}, metadata}
+        assert metadata == %{reason: "duplicate_external_id"}
 
         refute_received {:telemetry_event, @event_ingested, _, _}
       end)

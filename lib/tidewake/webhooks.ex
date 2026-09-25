@@ -209,7 +209,9 @@ defmodule Tidewake.Webhooks do
   defp emit_ingest_telemetry(result), do: result
 
   defp ingest_rejection_reason(changeset) do
-    if Enum.any?(changeset.errors, &external_id_conflict?/1), do: "conflict", else: "validation"
+    if Enum.any?(changeset.errors, &external_id_conflict?/1),
+      do: "duplicate_external_id",
+      else: "validation"
   end
 
   defp external_id_conflict?({:external_id, {_message, options}}),
