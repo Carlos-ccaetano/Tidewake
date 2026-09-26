@@ -11,6 +11,8 @@ Telemetry events carry an atom-list name, a measurements map, and a metadata map
 
 The domain distinguishes persisted delivery failures from processing failures. A non-2xx HTTP response or normalized transport failure is a completed processing outcome once the failed delivery and its attempt are committed. By contrast, a missing delivery, invalid transition, encoding problem, malformed adapter response, or persistence failure prevents confirmed finalization. The telemetry vocabulary must preserve that distinction.
 
+A delivery cancelled because its endpoint became inactive is another terminal result, but it is neither a processing outcome nor a processing failure. Cancellation is an expected operational decision that occurs before any HTTP attempt.
+
 ## Decision
 
 ### Event namespace and terminal events
@@ -22,13 +24,14 @@ Webhook telemetry uses the `[:tidewake, :webhooks]` prefix and defines these ter
 | `[:tidewake, :webhooks, :event, :ingested]` | `%{count: 1, delivery_count: non_neg_integer()}` | `%{}` | Event, deliveries, and initial jobs committed successfully. |
 | `[:tidewake, :webhooks, :event, :rejected]` | `%{count: 1}` | `%{reason: reason}` | Ingestion ended without committing a new event. |
 | `[:tidewake, :webhooks, :delivery, :processed]` | `%{count: 1, duration_ms: non_neg_integer()}` | `%{outcome: outcome}` | Delivery and attempt finalization committed successfully. |
+| `[:tidewake, :webhooks, :delivery, :cancelled]` | `%{count: 1}` | `%{reason: "endpoint_inactive"}` | Delivery was persisted as cancelled before any HTTP attempt. |
 | `[:tidewake, :webhooks, :delivery, :error]` | `%{count: 1, duration_ms: non_neg_integer()}` | `%{reason: reason}` | Processing ended without confirmed delivery finalization. |
 
 `count` is always the integer `1`; batching is not part of this contract. `delivery_count` is the number of deliveries committed by the successful ingestion, including `0` when no endpoint was eligible. It is a measurement, never a tag.
 
 `duration_ms` is the non-negative elapsed time of the delivery processing operation, from entry into processing until its terminal result. It is measured with a monotonic clock and converted to integer milliseconds after subtraction. It is not a wall-clock timestamp and is not copied from client or adapter data.
 
-No start event is defined in this first contract. Each ingestion or delivery-processing invocation emits at most one of its two terminal events, avoiding double counting and preventing a start signal from being mistaken for durable success.
+No start event is defined in this first contract. Each ingestion invocation emits at most one of `ingested` or `rejected`, and each delivery-processing invocation emits at most one of `processed`, `cancelled`, or `error`. This avoids double counting and prevents a start signal from being mistaken for a durable terminal result.
 
 ### Commit and finalization boundary
 
@@ -38,7 +41,9 @@ No start event is defined in this first contract. Each ingestion or delivery-pro
 
 `[:tidewake, :webhooks, :delivery, :processed]` may be emitted only after `Webhooks.finalize_delivery/2` confirms that both the attempt and final delivery state were committed. Its `outcome` is derived from that persisted attempt. In particular, committed `http_error` and `transport_error` attempts are processed outcomes rather than `delivery:error` telemetry.
 
-`[:tidewake, :webhooks, :delivery, :error]` is emitted when processing returns or normalizes an error without confirmed finalization. A processing invocation must not emit both `processed` and `error`. Telemetry emission is observational and occurs after the domain result is known; it does not participate in or change the transaction result.
+`[:tidewake, :webhooks, :delivery, :cancelled]` may be emitted only after the transaction that changes the delivery from `pending` to `cancelled` returns confirmed success. It represents an expected operational decision made before any HTTP request, so there is no `Attempt`. It is not `delivery:processed` because no attempt was finalized, and it is not `delivery:error` because endpoint inactivity is an expected cancellation outcome rather than a processing failure.
+
+`[:tidewake, :webhooks, :delivery, :error]` is emitted when processing returns or normalizes an error without confirmed finalization. A delivery-processing invocation must not emit more than one of `processed`, `cancelled`, or `error`. Telemetry emission is observational and occurs after the domain result is known; it does not participate in or change the transaction result.
 
 ### Metadata allowlists
 
@@ -70,6 +75,10 @@ The delivery processing error allowlist is:
 - `"persistence"`;
 - `"unknown"` as the bounded fallback.
 
+The delivery cancellation reason allowlist is initially limited to exactly:
+
+- `"endpoint_inactive"`.
+
 Implementations must map known domain errors to these values with explicit clauses. They must never use `inspect/1`, exception text, changeset errors, adapter-provided text, or arbitrary atoms or strings as `reason`. New reason or outcome values require an intentional contract change and cardinality review.
 
 ### Metric definitions
@@ -88,6 +97,8 @@ summary("tidewake.webhooks.delivery.processed.duration_ms",
   unit: :millisecond
 )
 
+counter("tidewake.webhooks.delivery.cancelled.count", tags: [:reason])
+
 counter("tidewake.webhooks.delivery.error.count", tags: [:reason])
 summary("tidewake.webhooks.delivery.error.duration_ms",
   tags: [:reason],
@@ -97,6 +108,8 @@ summary("tidewake.webhooks.delivery.error.duration_ms",
 
 The final metric-name segment selects the measurement, matching `Telemetry.Metrics` 1.2.0 conventions. Counters require the `count` measurement to be present even though a counter increments once per emitted event. The `delivery_count` sum reports the total fan-out created by accepted events. Duration summaries keep the same bounded `outcome` or `reason` dimensions as their associated counters.
 
+The cancellation counter has no duration measurement because no HTTP attempt begins. Its only tag is the bounded cancellation `reason`, initially with the single value `"endpoint_inactive"`.
+
 This ADR does not select or configure a reporter, exporter, backend, dashboard, retention policy, buckets, percentiles, service-level objective, or alert threshold. Metric aggregation and publication remain reporter responsibilities.
 
 ### Cardinality and confidentiality boundary
@@ -104,6 +117,7 @@ This ADR does not select or configure a reporter, exporter, backend, dashboard, 
 Metric tags are exactly the allowlisted `reason` and `outcome` values above. Untagged metrics use no metadata dimensions. The following values are prohibited from webhook event metadata and metric tags:
 
 - event, delivery, endpoint, attempt, or job IDs;
+- endpoint records, names, or other endpoint attributes;
 - `external_id`;
 - event type or arbitrary status values;
 - payloads or payload fragments;
@@ -116,12 +130,15 @@ Metric tags are exactly the allowlisted `reason` and `outcome` values above. Unt
 
 IDs may remain available in appropriately protected operational records or logs under a separate logging decision, but they are never metric dimensions. Payloads, URLs, headers, and secrets remain prohibited even outside metric tags because Telemetry events can be consumed by multiple handlers and reporters.
 
+Cancellation metadata is exactly `%{reason: "endpoint_inactive"}`. It never includes IDs, the endpoint or any endpoint attribute, URL, payload, request or response headers, or other contextual data.
+
 ## Consequences
 
 ### Positive
 
 - Accepted and rejected ingestion can be counted without reporting success before the fan-out transaction commits.
 - Persisted delivery outcomes are separated from failures that prevented finalization.
+- Expected delivery cancellation can be counted without inventing an HTTP attempt or reporting a processing error.
 - A fixed set of tags bounds time-series cardinality and makes dashboards predictable.
 - Sensitive and unbounded webhook data does not enter the Telemetry pipeline.
 - The event and measurement names map directly to `Telemetry.Metrics` definitions.
@@ -147,6 +164,10 @@ Rejected because those outcomes have completed the intended local processing tra
 
 Rejected because a later rollback would leave telemetry claiming work that does not exist. Success events follow confirmed persistence even if this adds a small delay before emission.
 
+### Report cancellation as `delivery:processed` or `delivery:error`
+
+Rejected because cancellation creates no attempt and is not a processing outcome, while endpoint inactivity is expected and is not a processing error. A distinct terminal event preserves both boundaries.
+
 ### Use logs without a telemetry contract
 
 Rejected because free-form logs do not define stable measurements or bounded dimensions. Logs may complement these metrics later, subject to the same confidentiality constraints.
@@ -162,7 +183,7 @@ Rejected because free-form logs do not define stable measurements or bounded dim
 
 ## Follow-up
 
-Instrument `Webhooks.ingest_event/1` and delivery processing in separate changes. Tests should attach handlers to the exact event names and verify one terminal event per invocation, post-commit timing, exact measurements, allowlisted metadata, zero-endpoint ingestion, duplicate rejection, persisted HTTP and transport outcomes, and processing errors. Add the metric definitions separately without selecting a reporter prematurely.
+Instrument delivery cancellation in a separate change. Tests should attach a handler to the exact event name and verify one terminal event per invocation, post-commit timing, exact measurements, the single allowlisted reason, absence of sensitive or unbounded metadata, and no `processed` or `error` event for the same cancellation. Add the cancellation metric definition separately without selecting a reporter prematurely.
 
 ## References
 
