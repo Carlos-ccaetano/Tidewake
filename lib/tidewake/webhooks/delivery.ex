@@ -5,7 +5,7 @@ defmodule Tidewake.Webhooks.Delivery do
 
   alias Tidewake.Webhooks.{Endpoint, Event}
 
-  @statuses ~w(pending processing succeeded failed)
+  @statuses ~w(pending processing succeeded failed cancelled)
   @fields [:status, :attempt_count, :next_attempt_at, :completed_at]
 
   schema "deliveries" do

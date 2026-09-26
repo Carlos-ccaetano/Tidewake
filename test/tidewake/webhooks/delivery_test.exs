@@ -67,6 +67,10 @@ defmodule Tidewake.Webhooks.DeliveryTest do
       end
     end
 
+    test "accepts the cancelled status" do
+      assert valid_changeset(%{status: "cancelled"}).valid?
+    end
+
     test "rejects a status outside the initial lifecycle" do
       changeset = valid_changeset(%{status: "exhausted"})
 
