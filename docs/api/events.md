@@ -186,12 +186,14 @@ Each delivery contains exactly these fields:
 | --- | --- |
 | `id` | Internal delivery ID. |
 | `endpoint_id` | Internal ID of the destination endpoint, without exposing its configuration. |
-| `status` | Current persisted delivery state, such as `pending`, `processing`, `succeeded`, or `failed`. `pending` does not mean that a webhook was sent. |
+| `status` | Current persisted delivery state: `pending`, `processing`, `succeeded`, `failed`, or `cancelled`. `pending` does not mean that a webhook was sent. |
 | `attempt_count` | Number of processing attempts persisted for the delivery. |
 | `next_attempt_at` | Scheduled time for a future attempt as a UTC ISO 8601 string, or `null` when absent. Retries are not implemented at this stage. |
 | `completed_at` | Completion time as a UTC ISO 8601 string, or `null` while incomplete. |
 | `inserted_at` | Creation time as a UTC ISO 8601 string. |
 | `updated_at` | Last update time as a UTC ISO 8601 string. |
+
+`cancelled` means the endpoint was inactive when the pending delivery would have been processed. Tidewake made no HTTP request and created no attempt, so `attempt_count` remains unchanged; `completed_at` records when the cancellation completed. Reactivating the endpoint does not automatically reopen the cancelled delivery.
 
 An existing event without deliveries returns `200 OK` with an empty list:
 
@@ -223,7 +225,8 @@ Returned when the event does not exist or the path value is invalid, negative, o
 - Activation of outbound HTTP requests with Req.
 - HMAC signing.
 - Retries and backoff.
+- Recovery of deliveries left in `processing`.
 - Authentication and authorization.
 - Event listing, updates, and deletion.
 
-These capabilities require separate work. Durable ingestion does not complete the broader delivery workflow described in the architecture and roadmap.
+These capabilities remain pending. Deterministic local processing and cancellation do not mean that external webhook delivery, retries, or recovery are active.
