@@ -374,6 +374,58 @@ defmodule Tidewake.WebhooksTest do
       assert Webhooks.list_attempts(claimed_delivery) == []
     end
 
+    test "claim_delivery/1 cancels a pending delivery when its endpoint became inactive" do
+      delivery = delivery_fixture()
+      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      before_claim = DateTime.utc_now()
+
+      assert {:cancelled, cancelled} = Webhooks.claim_delivery(delivery.id)
+
+      after_claim = DateTime.utc_now()
+      assert cancelled.status == "cancelled"
+      assert cancelled.attempt_count == delivery.attempt_count
+      assert cancelled.completed_at != nil
+      assert DateTime.compare(cancelled.completed_at, before_claim) in [:eq, :gt]
+      assert DateTime.compare(cancelled.completed_at, after_claim) in [:eq, :lt]
+      assert cancelled.event.id == delivery.event_id
+      assert cancelled.endpoint.id == delivery.endpoint_id
+      refute cancelled.endpoint.active
+      assert Ecto.assoc_loaded?(cancelled.event)
+      assert Ecto.assoc_loaded?(cancelled.endpoint)
+      assert Webhooks.get_delivery(delivery.id).status == "cancelled"
+      assert Webhooks.list_attempts(cancelled) == []
+
+      assert {:error, :invalid_transition} = Webhooks.claim_delivery(delivery.id)
+    end
+
+    for status <- ~w(processing succeeded failed cancelled) do
+      test "claim_delivery/1 does not cancel a delivery already in #{status}" do
+        status = unquote(status)
+        delivery = delivery_fixture()
+        endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+        completed_at = ~U[2026-09-25 12:00:00.123456Z]
+
+        attrs =
+          %{status: status, attempt_count: 3}
+          |> then(fn attrs ->
+            if status == "processing",
+              do: attrs,
+              else: Map.put(attrs, :completed_at, completed_at)
+          end)
+
+        persisted =
+          delivery
+          |> Changeset.change(attrs)
+          |> Repo.update!()
+
+        assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+        assert {:error, :invalid_transition} = Webhooks.claim_delivery(delivery.id)
+        assert Webhooks.get_delivery(delivery.id) == persisted
+        assert Webhooks.list_attempts(delivery) == []
+      end
+    end
+
     test "claim_delivery/1 returns not_found for an unknown ID" do
       assert {:error, :not_found} = Webhooks.claim_delivery(-1)
     end
