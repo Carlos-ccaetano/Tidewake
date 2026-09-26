@@ -41,6 +41,44 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert attempt.attempt_number == 1
   end
 
+  test "completes a scheduled job when the endpoint became inactive" do
+    configure_delivery_adapter(FailingDeliveryAdapter)
+
+    {:ok, event} =
+      Webhooks.create_event(%{
+        external_id: "evt_worker_cancelled",
+        event_type: "order.created",
+        payload: %{}
+      })
+
+    {:ok, endpoint} =
+      Webhooks.create_endpoint(%{
+        name: "Inactive before processing",
+        url: "https://endpoint.invalid/http-error"
+      })
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, %{delivery: delivery, job: job}} =
+               Webhooks.schedule_delivery(event, endpoint)
+
+      assert job.state == "available"
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+
+      completed_job = Repo.get!(Oban.Job, job.id)
+      assert completed_job.state == "completed"
+      assert completed_job.attempt == 1
+      assert completed_job.max_attempts == 1
+
+      cancelled = Webhooks.get_delivery(delivery.id)
+      assert cancelled.status == "cancelled"
+      assert cancelled.attempt_count == 0
+      assert cancelled.completed_at != nil
+      assert Webhooks.list_attempts(cancelled) == []
+      assert [] = all_enqueued(worker: DeliverWebhookWorker)
+    end)
+  end
+
   test "cancels a missing delivery without retrying" do
     assert {:cancel, :not_found} =
              perform_job(DeliverWebhookWorker, %{delivery_id: 2_147_483_647})
