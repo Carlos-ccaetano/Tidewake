@@ -11,6 +11,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   alias Tidewake.Webhooks.Envelope
   alias Tidewake.Webhooks.ResponseMetadata
 
+  @delivery_cancelled [:tidewake, :webhooks, :delivery, :cancelled]
   @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
   @delivery_error [:tidewake, :webhooks, :delivery, :error]
   @outcomes ~w(succeeded http_error transport_error)
@@ -73,6 +74,19 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   end
 
   defp finalize(_id, _response, _timing), do: {:error, :invalid_adapter_response}
+
+  defp emit_processing_telemetry(
+         {:ok, %{delivery: %{status: "cancelled"}, attempt: nil}} = result,
+         _duration_ms
+       ) do
+    :telemetry.execute(
+      @delivery_cancelled,
+      %{count: 1},
+      %{reason: "endpoint_inactive"}
+    )
+
+    result
+  end
 
   defp emit_processing_telemetry(
          {:ok, %{attempt: %{result: outcome}}} = result,
