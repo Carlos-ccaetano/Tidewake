@@ -1,6 +1,7 @@
 defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   use Tidewake.DataCase, async: false
 
+  @delivery_cancelled [:tidewake, :webhooks, :delivery, :cancelled]
   @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
   @delivery_error [:tidewake, :webhooks, :delivery, :error]
 
@@ -173,11 +174,13 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     attach_telemetry(@delivery_error)
 
     delivery = delivery_fixture()
+    attach_cancelled_telemetry(delivery.id)
     endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
     assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
     before_processing = DateTime.utc_now()
 
     assert {:ok, %{delivery: cancelled, attempt: nil}} =
+             result =
              DeliveryProcessor.process(delivery.id, __MODULE__)
 
     after_processing = DateTime.utc_now()
@@ -188,7 +191,33 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert DateTime.compare(cancelled.completed_at, after_processing) in [:eq, :lt]
     assert Webhooks.get_delivery(delivery.id).status == "cancelled"
     assert Webhooks.list_attempts(cancelled) == []
+    assert result == {:ok, %{delivery: cancelled, attempt: nil}}
     refute_received {:delivered, _, _, _}
+
+    assert_received {:cancelled_telemetry, @delivery_cancelled, measurements, metadata,
+                     persisted_at_emission}
+
+    assert measurements == %{count: 1}
+    assert metadata == %{reason: "endpoint_inactive"}
+    assert persisted_at_emission.status == "cancelled"
+    assert persisted_at_emission.completed_at == cancelled.completed_at
+    assert persisted_at_emission.attempt_count == 0
+
+    for prohibited_key <- [
+          :id,
+          :delivery_id,
+          :endpoint,
+          :endpoint_id,
+          :url,
+          :payload,
+          :headers
+        ] do
+      refute Map.has_key?(measurements, prohibited_key)
+      refute Map.has_key?(metadata, prohibited_key)
+    end
+
+    refute Enum.any?(Map.values(measurements) ++ Map.values(metadata), &is_struct/1)
+    refute_received {:cancelled_telemetry, @delivery_cancelled, _, _, _}
     refute_received {:telemetry_event, @delivery_processed, _, _}
     refute_received {:telemetry_event, @delivery_error, _, _}
 
@@ -427,6 +456,15 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     send(test_pid, {:telemetry_event, event_name, measurements, metadata})
   end
 
+  @doc false
+  def handle_cancelled_telemetry(event_name, measurements, metadata, {test_pid, delivery_id}) do
+    send(
+      test_pid,
+      {:cancelled_telemetry, event_name, measurements, metadata,
+       Webhooks.get_delivery(delivery_id)}
+    )
+  end
+
   defp attach_telemetry(event_name) do
     handler_id = {__MODULE__, event_name, make_ref()}
 
@@ -436,6 +474,20 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         event_name,
         &__MODULE__.handle_telemetry/4,
         self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp attach_cancelled_telemetry(delivery_id) do
+    handler_id = {__MODULE__, @delivery_cancelled, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @delivery_cancelled,
+        &__MODULE__.handle_cancelled_telemetry/4,
+        {self(), delivery_id}
       )
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
