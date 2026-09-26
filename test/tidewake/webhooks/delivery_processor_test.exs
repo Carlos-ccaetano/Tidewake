@@ -168,6 +168,37 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert Webhooks.get_event(event.id) == event
   end
 
+  test "cancels an inactive endpoint without encoding, delivering or creating an attempt" do
+    attach_telemetry(@delivery_processed)
+    attach_telemetry(@delivery_error)
+
+    delivery = delivery_fixture()
+    endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+    assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+    before_processing = DateTime.utc_now()
+
+    assert {:ok, %{delivery: cancelled, attempt: nil}} =
+             DeliveryProcessor.process(delivery.id, __MODULE__)
+
+    after_processing = DateTime.utc_now()
+    assert cancelled.status == "cancelled"
+    assert cancelled.attempt_count == 0
+    assert cancelled.completed_at != nil
+    assert DateTime.compare(cancelled.completed_at, before_processing) in [:eq, :gt]
+    assert DateTime.compare(cancelled.completed_at, after_processing) in [:eq, :lt]
+    assert Webhooks.get_delivery(delivery.id).status == "cancelled"
+    assert Webhooks.list_attempts(cancelled) == []
+    refute_received {:delivered, _, _, _}
+    refute_received {:telemetry_event, @delivery_processed, _, _}
+    refute_received {:telemetry_event, @delivery_error, _, _}
+
+    assert {:error, :invalid_transition} =
+             DeliveryProcessor.process(delivery.id, __MODULE__)
+
+    refute_received {:delivered, _, _, _}
+    assert Webhooks.list_attempts(cancelled) == []
+  end
+
   test "propagates not found without calling the adapter" do
     assert {:error, :not_found} = DeliveryProcessor.process(-1, __MODULE__)
     refute_received {:delivered, _, _, _}
