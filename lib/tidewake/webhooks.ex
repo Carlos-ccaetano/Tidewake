@@ -73,18 +73,21 @@ defmodule Tidewake.Webhooks do
   end
 
   def claim_delivery(id) do
-    now = DateTime.utc_now()
+    Repo.transaction(fn ->
+      query = from(delivery in Delivery, where: delivery.id == ^id, lock: "FOR UPDATE")
 
-    query =
-      from(delivery in Delivery,
-        where: delivery.id == ^id and delivery.status == "pending",
-        select: delivery
-      )
+      case Repo.one(query) do
+        nil ->
+          Repo.rollback(:not_found)
 
-    case Repo.update_all(query, set: [status: "processing", updated_at: now]) do
-      {1, [delivery]} -> {:ok, Repo.preload(delivery, [:event, :endpoint])}
-      {0, []} -> claim_delivery_error(id)
-    end
+        %Delivery{status: "pending"} = delivery ->
+          prepare_pending_delivery(delivery)
+
+        %Delivery{} ->
+          Repo.rollback(:invalid_transition)
+      end
+    end)
+    |> normalize_claim_result()
   end
 
   def finalize_delivery(delivery_id, attempt_attrs) do
@@ -249,10 +252,36 @@ defmodule Tidewake.Webhooks do
     end
   end
 
-  defp claim_delivery_error(id) do
-    case Repo.get(Delivery, id) do
-      nil -> {:error, :not_found}
-      %Delivery{} -> {:error, :invalid_transition}
+  defp prepare_pending_delivery(delivery) do
+    endpoint =
+      from(endpoint in Endpoint,
+        where: endpoint.id == ^delivery.endpoint_id,
+        lock: "FOR UPDATE"
+      )
+      |> Repo.one!()
+
+    event = Repo.get!(Event, delivery.event_id)
+    delivery = %{delivery | endpoint: endpoint, event: event}
+
+    if endpoint.active do
+      persist_claim_transition(delivery, %{status: "processing"}, :ok)
+    else
+      persist_claim_transition(
+        delivery,
+        %{status: "cancelled", completed_at: DateTime.utc_now()},
+        :cancelled
+      )
     end
   end
+
+  defp persist_claim_transition(delivery, attrs, result) do
+    case delivery |> Delivery.changeset(attrs) |> Repo.update() do
+      {:ok, delivery} -> {result, delivery}
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp normalize_claim_result({:ok, {:ok, delivery}}), do: {:ok, delivery}
+  defp normalize_claim_result({:ok, {:cancelled, delivery}}), do: {:cancelled, delivery}
+  defp normalize_claim_result({:error, reason}), do: {:error, reason}
 end
