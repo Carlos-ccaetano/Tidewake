@@ -30,6 +30,7 @@ defmodule TidewakeWeb.Telemetry do
         tags: [:outcome],
         unit: :millisecond
       ),
+      counter("tidewake.webhooks.delivery.cancelled.count", tags: [:reason]),
       counter("tidewake.webhooks.delivery.error.count", tags: [:reason]),
       summary("tidewake.webhooks.delivery.error.duration_ms",
         tags: [:reason],

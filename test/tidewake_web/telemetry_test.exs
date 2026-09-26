@@ -10,6 +10,7 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :event, :rejected, :count],
     [:tidewake, :webhooks, :delivery, :processed, :count],
     [:tidewake, :webhooks, :delivery, :processed, :duration_ms],
+    [:tidewake, :webhooks, :delivery, :cancelled, :count],
     [:tidewake, :webhooks, :delivery, :error, :count],
     [:tidewake, :webhooks, :delivery, :error, :duration_ms]
   ]
@@ -29,6 +30,14 @@ defmodule TidewakeWeb.TelemetryTest do
     assert %Summary{tags: [:outcome], unit: :millisecond} =
              metric!(metrics, "tidewake.webhooks.delivery.processed.duration_ms")
 
+    assert %Counter{
+             name: [:tidewake, :webhooks, :delivery, :cancelled, :count],
+             event_name: [:tidewake, :webhooks, :delivery, :cancelled],
+             measurement: :count,
+             tags: [:reason]
+           } =
+             metric!(metrics, "tidewake.webhooks.delivery.cancelled.count")
+
     assert %Counter{tags: [:reason]} =
              metric!(metrics, "tidewake.webhooks.delivery.error.count")
 
@@ -45,6 +54,7 @@ defmodule TidewakeWeb.TelemetryTest do
   test "uses the expected event and measurement names" do
     domain_metrics = Telemetry.metrics() |> domain_metrics()
 
+    assert length(domain_metrics) == length(@domain_metric_names)
     assert MapSet.new(domain_metrics, & &1.name) == MapSet.new(@domain_metric_names)
 
     Enum.each(domain_metrics, fn metric ->
