@@ -40,6 +40,9 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
         completed_at: completed_at,
         duration_ms: duration_ms
       })
+    else
+      {:cancelled, delivery} -> {:ok, %{delivery: delivery, attempt: nil}}
+      result -> result
     end
   end
 
