@@ -3,6 +3,13 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
   alias Tidewake.Webhooks
 
+  setup %{conn: conn} do
+    api_token = Application.fetch_env!(:tidewake, :api_token)
+    conn = put_req_header(conn, "authorization", "Bearer #{api_token}")
+
+    {:ok, conn: conn}
+  end
+
   describe "POST /api/endpoints" do
     test "creates an endpoint from an unwrapped payload", %{conn: conn} do
       conn = post(conn, ~p"/api/endpoints", valid_attrs())
