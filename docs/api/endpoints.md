@@ -6,7 +6,7 @@ Endpoint persistence and the endpoint management HTTP API are implemented. The `
 
 Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint, and its worker and processor support deterministic local processing, persisted attempts and local results, and Telemetry.
 
-A Req-based adapter is implemented, but it is not configured as the active transport. Tidewake therefore does not perform external HTTP webhook delivery in production yet. The HTTP API also does not require authentication yet.
+A Req-based adapter is implemented, but it is not configured as the active transport. Tidewake therefore does not perform external HTTP webhook delivery in production yet. Every route under `/api`, including endpoint management, requires the configured static API token.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -35,6 +35,33 @@ Timestamps use ISO 8601 UTC values in the examples in this document.
 | `PATCH` | `/api/endpoints/:id` | Update an endpoint. |
 
 Permanent deletion is not part of this initial contract. To stop new deliveries while preserving future delivery and attempt history, a client should update `active` to `false`.
+
+## Authentication
+
+All routes under `/api` are protected. A client must send exactly one authorization header using the configured static API token:
+
+```http
+Authorization: Bearer <token>
+```
+
+A missing, malformed, duplicated, or invalid header returns `401 Unauthorized` before the controller or any endpoint operation runs. The response includes:
+
+```http
+WWW-Authenticate: Bearer
+```
+
+and this JSON body:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Valid API token required"
+  }
+}
+```
+
+The response does not expose the configured or presented token. User identities, project-level authorization, scopes, multiple tokens, and automatic rotation are not part of this initial authentication boundary.
 
 ### POST /api/endpoints
 
@@ -220,7 +247,7 @@ Error responses must not expose database details or stack traces.
 
 The following capabilities remain outside the current implementation:
 
-- authentication or authorization;
+- user, project, or scoped authorization beyond the static API token;
 - production activation and configuration of external HTTP webhook delivery through the Req adapter;
 - SSRF protection for outbound destinations;
 - enforcement of a real response-body byte limit;
