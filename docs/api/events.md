@@ -2,7 +2,7 @@
 
 ## Status
 
-Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
+Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Every route under `/api`, including these event operations, requires the configured static API token. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
 
 Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. Outbound HTTP activation, signing, and retries remain pending.
 
@@ -14,6 +14,33 @@ Ingestion atomically persists the event, one pending delivery for each active en
 | `GET` | `/api/events/:id` | Retrieve one event by its internal ID. |
 | `GET` | `/api/events/:id/deliveries` | List the persisted delivery status records for one event. |
 
+## Authentication
+
+All routes under `/api` are protected. A client must send exactly one authorization header using the configured static API token:
+
+```http
+Authorization: Bearer <token>
+```
+
+A missing, malformed, duplicated, or invalid header returns `401 Unauthorized` before the controller or any event operation runs. The response includes:
+
+```http
+WWW-Authenticate: Bearer
+```
+
+and this JSON body:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Valid API token required"
+  }
+}
+```
+
+The response does not expose the configured or presented token. User identities, project-level authorization, scopes, multiple tokens, and automatic rotation are not part of this initial authentication boundary.
+
 ## POST /api/events
 
 Accepts a client-provided event as a JSON object.
@@ -21,6 +48,7 @@ Accepts a client-provided event as a JSON object.
 ```http
 POST /api/events
 Content-Type: application/json
+Authorization: Bearer <token>
 ```
 
 Request:
@@ -226,7 +254,7 @@ Returned when the event does not exist or the path value is invalid, negative, o
 - HMAC signing.
 - Retries and backoff.
 - Recovery of deliveries left in `processing`.
-- Authentication and authorization.
+- User, project, or scoped authorization beyond the static API token.
 - Event listing, updates, and deletion.
 
 These capabilities remain pending. Deterministic local processing and cancellation do not mean that external webhook delivery, retries, or recovery are active.
