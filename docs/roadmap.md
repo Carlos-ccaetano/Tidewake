@@ -31,6 +31,7 @@ Implemented:
 - `POST /api/events` for validation and atomic persistence of the event, its fan-out deliveries, and initial jobs;
 - `GET /api/events/:id` for individual event retrieval;
 - `GET /api/events/:id/deliveries` for the event's ordered delivery status without endpoint configuration, payloads, or attempts;
+- static Bearer token authentication for every `/api` route, with validated production configuration and a stable unauthorized response;
 - tests for event validation, persistence, duplicate ingestion, rollback boundaries, fan-out, and the implemented HTTP operations;
 - atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
 - an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
@@ -47,10 +48,9 @@ Implemented:
 
 Pending acceptance work:
 
-- authenticate the event API or explicitly restrict it to development;
 - recover deliveries left in `processing` after execution, malformed-response, or persistence failures.
 
-This milestone is not complete. Transactional ingestion, fan-out, status visibility, delivery-time cancellation, and bounded observability are implemented, but authentication and recovery of deliveries stuck in `processing` remain acceptance gaps. No real external delivery is enabled, and retries and backoff remain in Milestone 3.
+This milestone is not complete. Transactional ingestion, fan-out, status visibility, delivery-time cancellation, API authentication, and bounded observability are implemented, but recovery of deliveries stuck in `processing` remains an acceptance gap. No real external delivery is enabled: the Req adapter still awaits SSRF protection and a hard response-byte limit before activation, HMAC signing remains planned in Milestone 2, and retries and backoff remain in Milestone 3.
 
 ## Milestone 2: endpoints and signed delivery
 
