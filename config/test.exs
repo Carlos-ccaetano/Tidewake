@@ -7,6 +7,8 @@ import Config
 # Run `mix help test` for more information.
 database_port = String.to_integer(System.get_env("POSTGRES_PORT", "5432"))
 
+config :tidewake, :api_token, "test-only-api-token-not-for-production"
+
 config :tidewake, Tidewake.Repo,
   username: System.get_env("POSTGRES_USER", "postgres"),
   password: System.get_env("POSTGRES_PASSWORD", "postgres"),
