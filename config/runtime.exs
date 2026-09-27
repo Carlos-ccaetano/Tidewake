@@ -41,6 +41,16 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
+  api_token =
+    System.get_env("TIDEWAKE_API_TOKEN") ||
+      raise "environment variable TIDEWAKE_API_TOKEN is missing"
+
+  if byte_size(api_token) < 32 do
+    raise "environment variable TIDEWAKE_API_TOKEN must be at least 32 bytes"
+  end
+
+  config :tidewake, :api_token, api_token
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
