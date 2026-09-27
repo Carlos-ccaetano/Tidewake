@@ -19,6 +19,7 @@ defmodule TidewakeWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
+    plug TidewakeWeb.Plugs.RequireApiToken
   end
 
   scope "/", TidewakeWeb do

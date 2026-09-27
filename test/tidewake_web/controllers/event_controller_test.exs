@@ -3,6 +3,13 @@ defmodule TidewakeWeb.EventControllerTest do
 
   alias Tidewake.{Repo, Webhooks}
 
+  setup %{conn: conn} do
+    api_token = Application.fetch_env!(:tidewake, :api_token)
+    conn = put_req_header(conn, "authorization", "Bearer #{api_token}")
+
+    {:ok, conn: conn}
+  end
+
   describe "POST /api/events" do
     test "creates and serializes an event without active endpoints or jobs", %{conn: conn} do
       Oban.Testing.with_testing_mode(:manual, fn ->
