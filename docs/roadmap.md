@@ -37,20 +37,20 @@ Implemented:
 - a deterministic local adapter returning simulated HTTP 204 without external requests;
 - attempt creation for successful responses, HTTP errors, and transport errors, atomically finalized with the delivery and its counter;
 - safe extraction of bounded, allowlisted response metadata without response bodies or secret headers;
-- the `pending → processing → succeeded/failed` transitions, with atomic claim and finalization;
+- the `pending → processing → succeeded/failed` transitions and terminal `pending → cancelled` transition, with atomic claim and finalization;
+- delivery-time endpoint re-evaluation that cancels a pending delivery for an inactive endpoint without an adapter call or attempt;
 - tests for transactional scheduling, rollback, and complete success and persisted-failure cycles through the worker;
 - a Req-backed adapter with explicit timeouts, redirects and internal retries disabled, implemented and tested in isolation without activation;
 - transactional fan-out to active endpoints in increasing ID order, creating one delivery and one initial job per destination;
-- bounded Telemetry events for confirmed ingestion, rejection, delivery processing, and controlled processing errors;
-- declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, and controlled error reasons and duration.
+- bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, and controlled processing errors;
+- declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, and controlled error reasons and duration.
 
 Pending acceptance work:
 
 - authenticate the event API or explicitly restrict it to development;
-- define and enforce the delivery-time policy for an endpoint disabled after its job was scheduled;
 - recover deliveries left in `processing` after execution, malformed-response, or persistence failures.
 
-This milestone is not complete. Transactional ingestion, fan-out, status visibility, and bounded observability are implemented, but authentication, delivery-time handling for endpoints disabled after scheduling, and recovery of deliveries stuck in `processing` remain acceptance gaps. No real external delivery is enabled, and retries and backoff remain in Milestone 3.
+This milestone is not complete. Transactional ingestion, fan-out, status visibility, delivery-time cancellation, and bounded observability are implemented, but authentication and recovery of deliveries stuck in `processing` remain acceptance gaps. No real external delivery is enabled, and retries and backoff remain in Milestone 3.
 
 ## Milestone 2: endpoints and signed delivery
 
