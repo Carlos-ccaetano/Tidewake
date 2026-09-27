@@ -2,11 +2,11 @@
 
 ## Status
 
-This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Atomic delivery claim with delivery-time endpoint re-evaluation, cancellation, and finalization, the adapter contract, a deterministic local adapter, JSON envelope encoding, success and failure processing, safe response metadata extraction, an Oban worker, and atomic delivery/job scheduling through `schedule_delivery/2` are available.
+This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Static Bearer token authentication protects every route under `/api`. Atomic delivery claim with delivery-time endpoint re-evaluation, cancellation, and finalization, the adapter contract, a deterministic local adapter, JSON envelope encoding, success and failure processing, safe response metadata extraction, an Oban worker, and atomic delivery/job scheduling through `schedule_delivery/2` are available.
 
 `POST /api/events` now atomically persists the event, one pending delivery per active endpoint, and exactly one initial Oban job per delivery. The delivery status API exposes the resulting records, including terminal `cancelled` outcomes, without endpoint configuration, payloads, or attempts. Ingestion, delivery processing, and cancellation emit bounded Telemetry events, and declarative counters, sums, and duration summaries are available in `TidewakeWeb.Telemetry`.
 
-The Req adapter is implemented and tested, but it is not activated. The deterministic adapter simulates a 204 response without I/O and remains configured in tests. Complete destination protection against SSRF, a hard limit on response bytes actually received, HMAC signing, retries and backoff, authentication, recovery of deliveries stuck in `processing`, and an operational LiveView remain pending. Real external deliveries are not enabled.
+The Req adapter is implemented and tested, but it is not activated. The deterministic adapter simulates a 204 response without I/O and remains configured in tests. Complete destination protection against SSRF, a hard limit on response bytes actually received, HMAC signing, retries and backoff, recovery of deliveries stuck in `processing`, and an operational LiveView remain pending. User identities, project-level authorization, and automatic token rotation also remain future work. Real external deliveries are not enabled.
 
 ## System boundary
 
@@ -110,11 +110,12 @@ The processor records successful, HTTP error, and transport error attempts. `Res
 
 ## Current and future code boundaries
 
-`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, active endpoint lookup, atomic ingestion fan-out, delivery listing, atomic claim-time endpoint re-evaluation and cancellation, finalization, and transactional scheduling for one delivery. `EventController` exposes event ingestion, retrieval, and the read-only delivery status route. `Envelope` serializes events. `ResponseMetadata` enforces the safe response metadata boundary. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation, while `DeliveryAdapters.Req` implements and tests the inactive real HTTP transport. `DeliveryProcessor` coordinates cancellation, successful, HTTP error, and transport error outcomes, while `Tidewake.Workers.DeliverWebhookWorker` delegates to it using the configured adapter and one job attempt. `TidewakeWeb.Telemetry` declares the bounded domain metrics alongside the existing Phoenix, Ecto, and VM metrics.
+`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, active endpoint lookup, atomic ingestion fan-out, delivery listing, atomic claim-time endpoint re-evaluation and cancellation, finalization, and transactional scheduling for one delivery. `TidewakeWeb.Plugs.RequireApiToken` authenticates every route in the Phoenix `:api` pipeline against the configured static token, using equal-length constant-time comparison and a stable `401 Unauthorized` response. Authentication remains a `TidewakeWeb` concern and does not enter the `Tidewake.Webhooks` context. `EventController` exposes event ingestion, retrieval, and the read-only delivery status route. `Envelope` serializes events. `ResponseMetadata` enforces the safe response metadata boundary. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation, while `DeliveryAdapters.Req` implements and tests the inactive real HTTP transport. `DeliveryProcessor` coordinates cancellation, successful, HTTP error, and transport error outcomes, while `Tidewake.Workers.DeliverWebhookWorker` delegates to it using the configured adapter and one job attempt. `TidewakeWeb.Telemetry` declares the bounded domain metrics alongside the existing Phoenix, Ecto, and VM metrics.
 
 Additional responsibilities and namespaces may emerge as behavior is implemented:
 
 - Tidewake.Projects for ownership;
+- user identities, project-level authorization, and API credential rotation or replacement;
 - recovery of deliveries stuck in `processing`;
 - SSRF-safe destination validation and a hard response-consumption limit before activating the Req adapter;
 - Tidewake.Security for HMAC signing and secret handling;

@@ -4,7 +4,7 @@ Tidewake is an early-stage platform for reliable webhook delivery. It is intende
 
 The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` does not mean a webhook was sent or delivered. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record local delivery outcomes, bounded Telemetry events cover ingestion, processing, and cancellation, and declarative domain metrics are available.
 
-The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. Authentication, retries and backoff, HMAC signing, recovery of deliveries stuck in `processing`, audit records, and the operational LiveView remain pending.
+The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. Every `/api` route now requires a configured static Bearer token. Users, project-level authorization, automatic token rotation, retries and backoff, HMAC signing, recovery of deliveries stuck in `processing`, audit records, and the operational LiveView remain pending.
 
 ## Relationship with Ironhold
 
@@ -78,15 +78,20 @@ Start the application:
 
 Open [http://localhost:4000](http://localhost:4000).
 
+All `/api` routes require `Authorization: Bearer <token>`. For the local examples, export the public disposable development value:
+
+    export TIDEWAKE_API_TOKEN=dev-only-api-token-not-for-production
+
+This local value is not a secret and must never be used in production. Production must provide its own `TIDEWAKE_API_TOKEN` containing at least 32 bytes.
+
 The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api/endpoints/:id`, and `PATCH /api/endpoints/:id`. For example, create a persisted endpoint with:
 
     curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
+      -H "Authorization: Bearer ${TIDEWAKE_API_TOKEN}" \
       -H 'content-type: application/json' \
       -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 
 The event API supports `POST /api/events`, `GET /api/events/:id`, and `GET /api/events/:id/deliveries`. Event listing, updates, deletion, and attempt detail are not implemented.
-
-Authentication is not implemented yet, so do not expose this API to untrusted networks.
 
 Stop the database when finished:
 
@@ -96,17 +101,18 @@ The named Docker volume preserves local database data. Use docker compose down -
 
 ## Environment variables
 
-Local database configuration supports:
+Local configuration supports:
 
 | Variable | Local default | Purpose |
 | --- | --- | --- |
+| TIDEWAKE_API_TOKEN | dev-only-api-token-not-for-production | Static Bearer token for `/api`; this public local value is not for production. |
 | POSTGRES_USER | postgres | PostgreSQL user |
 | POSTGRES_PASSWORD | postgres | Local-only PostgreSQL password |
 | POSTGRES_DB | tidewake_dev | Development database |
 | POSTGRES_HOST | localhost | Database host |
 | POSTGRES_PORT | 5432 | Database port |
 
-Production additionally requires DATABASE_URL and SECRET_KEY_BASE. PHX_HOST and PORT configure the public endpoint. Never commit a populated .env file or real credentials.
+Production additionally requires DATABASE_URL, SECRET_KEY_BASE, and a `TIDEWAKE_API_TOKEN` of at least 32 bytes. PHX_HOST and PORT configure the public endpoint. Never commit a populated .env file or real credentials.
 
 ## Quality checks
 
