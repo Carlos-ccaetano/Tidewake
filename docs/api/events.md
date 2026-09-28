@@ -39,11 +39,20 @@ and this JSON body:
 }
 ```
 
-The response does not expose the configured or presented token. User identities, project-level authorization, scopes, multiple tokens, and automatic rotation are not part of this initial authentication boundary.
+Development uses the recognizable non-production token `dev-only-api-token-not-for-production` by default. Production has no fallback: `TIDEWAKE_API_TOKEN` is required and must contain at least 32 bytes. No real token belongs in source control or documentation.
+
+This shared static token is only an initial authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, scopes, multiple simultaneous tokens, and automatic rotation remain pending.
 
 ## POST /api/events
 
-Accepts a client-provided event as a JSON object.
+Accepts a client-provided event as a JSON object. For example, using the public local development value rather than a real credential:
+
+```bash
+curl --fail-with-body -X POST http://localhost:4000/api/events \
+  -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+  -H 'content-type: application/json' \
+  -d '{"external_id":"evt_123","type":"order.created","data":{"order_id":"123"}}'
+```
 
 ```http
 POST /api/events
@@ -254,7 +263,7 @@ Returned when the event does not exist or the path value is invalid, negative, o
 - HMAC signing.
 - Retries and backoff.
 - Recovery of deliveries left in `processing`.
-- User, project, or scoped authorization beyond the static API token.
+- Users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token.
 - Event listing, updates, and deletion.
 
 These capabilities remain pending. Deterministic local processing and cancellation do not mean that external webhook delivery, retries, or recovery are active.

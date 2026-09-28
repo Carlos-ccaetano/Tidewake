@@ -61,13 +61,26 @@ and this JSON body:
 }
 ```
 
-The response does not expose the configured or presented token. User identities, project-level authorization, scopes, multiple tokens, and automatic rotation are not part of this initial authentication boundary.
+Development uses the recognizable non-production token `dev-only-api-token-not-for-production` by default. Production has no fallback: `TIDEWAKE_API_TOKEN` is required and must contain at least 32 bytes. No real token belongs in source control or documentation.
+
+This shared static token is only an initial authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, scopes, multiple simultaneous tokens, and automatic rotation remain pending.
 
 ### POST /api/endpoints
 
 Registers a new webhook destination. The request includes the endpoint name and destination URL. `active` defaults to `true` when it is not provided.
 
 Request:
+
+```bash
+curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
+  -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+  -H 'content-type: application/json' \
+  -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
+```
+
+The header value above is the public local development value, not a production credential.
+
+Request body:
 
 ```json
 {
@@ -247,7 +260,7 @@ Error responses must not expose database details or stack traces.
 
 The following capabilities remain outside the current implementation:
 
-- user, project, or scoped authorization beyond the static API token;
+- users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token;
 - production activation and configuration of external HTTP webhook delivery through the Req adapter;
 - SSRF protection for outbound destinations;
 - enforcement of a real response-body byte limit;

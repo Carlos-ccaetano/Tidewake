@@ -78,16 +78,27 @@ Start the application:
 
 Open [http://localhost:4000](http://localhost:4000).
 
-All `/api` routes require `Authorization: Bearer <token>`. For the local examples, export the public disposable development value:
+All current `/api` routes require the configured static token in an `Authorization: Bearer <token>` header. Development defaults to the recognizable non-production value below:
 
     export TIDEWAKE_API_TOKEN=dev-only-api-token-not-for-production
 
-This local value is not a secret and must never be used in production. Production must provide its own `TIDEWAKE_API_TOKEN` containing at least 32 bytes.
+This local value is public, disposable, and must never be used in production. Production must provide its own `TIDEWAKE_API_TOKEN` containing at least 32 bytes. Missing, malformed, duplicated, or invalid credentials return `401 Unauthorized`, include `WWW-Authenticate: Bearer`, and use this public response:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Valid API token required"
+  }
+}
+```
+
+This shared token provides only an initial authentication boundary. Users, login sessions, OAuth, JWT, project-level authorization, and automatic token rotation remain pending.
 
 The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api/endpoints/:id`, and `PATCH /api/endpoints/:id`. For example, create a persisted endpoint with:
 
     curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
-      -H "Authorization: Bearer ${TIDEWAKE_API_TOKEN}" \
+      -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
       -H 'content-type: application/json' \
       -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 
