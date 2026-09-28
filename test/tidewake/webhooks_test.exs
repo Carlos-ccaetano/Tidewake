@@ -3,6 +3,7 @@ defmodule Tidewake.WebhooksTest do
 
   alias Ecto.Changeset
   alias Tidewake.Webhooks
+  alias Tidewake.Workers.DeliverWebhookWorker
 
   describe "events" do
     test "create_event/1 persists a valid event" do
@@ -442,6 +443,162 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "recover_stale_delivery/2" do
+    test "recovers a stale processing delivery and creates its replacement job atomically" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        stale_before = ~U[2026-09-28 12:00:00.000000Z]
+        delivery = delivery_fixture()
+
+        processing =
+          put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z], %{
+            attempt_count: 3,
+            completed_at: ~U[2026-09-28 11:56:00.000000Z],
+            next_attempt_at: ~U[2026-09-28 12:05:00.000000Z]
+          })
+
+        assert {:ok, %{delivery: recovered, job: job}} =
+                 Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+        assert recovered.status == "pending"
+        assert recovered.attempt_count == processing.attempt_count
+        assert recovered.completed_at == nil
+        assert recovered.next_attempt_at == nil
+        assert job.args == %{"delivery_id" => processing.id}
+        assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
+        assert job.state == "available"
+        refute job.conflict?
+        assert Repo.get!(Oban.Job, job.id).args == %{"delivery_id" => processing.id}
+        assert Repo.aggregate(Oban.Job, :count) == 1
+        assert Webhooks.list_attempts(recovered) == []
+        assert Repo.aggregate(Tidewake.Webhooks.Attempt, :count) == 0
+      end)
+    end
+
+    test "treats the stale boundary as inclusive" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        stale_before = ~U[2026-09-28 12:00:00.000000Z]
+        delivery = delivery_fixture()
+        processing = put_delivery_state(delivery, "processing", stale_before)
+
+        assert {:ok, %{delivery: recovered, job: job}} =
+                 Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+        assert recovered.status == "pending"
+        assert job.args == %{"delivery_id" => processing.id}
+      end)
+    end
+
+    test "rejects a processing delivery newer than the stale boundary" do
+      stale_before = ~U[2026-09-28 12:00:00.000000Z]
+      delivery = delivery_fixture()
+
+      processing =
+        put_delivery_state(delivery, "processing", ~U[2026-09-28 12:00:00.000001Z])
+
+      assert {:error, :not_stale} =
+               Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+      assert Webhooks.get_delivery(processing.id) == processing
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+
+    for status <- ~w(pending succeeded failed cancelled) do
+      test "rejects a delivery in #{status}" do
+        status = unquote(status)
+        delivery = delivery_fixture()
+
+        current =
+          put_delivery_state(delivery, status, ~U[2026-09-28 11:55:00.000000Z], %{
+            completed_at: if(status == "pending", do: nil, else: ~U[2026-09-28 11:56:00.000000Z])
+          })
+
+        assert {:error, :invalid_transition} =
+                 Webhooks.recover_stale_delivery(
+                   current.id,
+                   ~U[2026-09-28 12:00:00.000000Z]
+                 )
+
+        assert Webhooks.get_delivery(current.id) == current
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end
+    end
+
+    test "returns not_found for an unknown positive ID" do
+      assert {:error, :not_found} =
+               Webhooks.recover_stale_delivery(
+                 2_147_483_647,
+                 ~U[2026-09-28 12:00:00.000000Z]
+               )
+
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+
+    test "rolls back the state transition when an equivalent active job exists" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture()
+
+        processing =
+          put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z], %{
+            attempt_count: 2,
+            completed_at: ~U[2026-09-28 11:56:00.000000Z],
+            next_attempt_at: ~U[2026-09-28 12:05:00.000000Z]
+          })
+
+        assert {:ok, active_job} =
+                 processing.id
+                 |> DeliverWebhookWorker.new_for_delivery()
+                 |> Oban.insert()
+
+        assert {:error, :active_job} =
+                 Webhooks.recover_stale_delivery(
+                   processing.id,
+                   ~U[2026-09-28 12:00:00.000000Z]
+                 )
+
+        assert Webhooks.get_delivery(processing.id) == processing
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
+        assert Webhooks.list_attempts(processing) == []
+      end)
+    end
+
+    test "a repeated recovery does not create another job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture()
+
+        processing =
+          put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z])
+
+        stale_before = ~U[2026-09-28 12:00:00.000000Z]
+
+        assert {:ok, %{delivery: recovered, job: job}} =
+                 Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+        assert {:error, :invalid_transition} =
+                 Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+        assert Webhooks.get_delivery(processing.id) == recovered
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [job.id]
+      end)
+    end
+
+    test "validates the delivery ID and stale boundary" do
+      stale_before = ~U[2026-09-28 12:00:00.000000Z]
+
+      for {delivery_id, boundary} <- [
+            {0, stale_before},
+            {-1, stale_before},
+            {"1", stale_before},
+            {1, nil},
+            {1, "2026-09-28T12:00:00Z"}
+          ] do
+        assert {:error, :invalid_arguments} =
+                 Webhooks.recover_stale_delivery(delivery_id, boundary)
+      end
+
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+  end
+
   describe "finalize_delivery/2" do
     test "persists a successful attempt and finalizes together" do
       delivery = delivery_fixture()
@@ -767,6 +924,14 @@ defmodule Tidewake.WebhooksTest do
     endpoint = endpoint_fixture()
     {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
     delivery
+  end
+
+  defp put_delivery_state(delivery, status, updated_at, attrs \\ %{}) do
+    attrs = Map.merge(attrs, %{status: status, updated_at: updated_at})
+
+    delivery
+    |> Changeset.change(attrs)
+    |> Repo.update!()
   end
 
   defp attempt_fixture(delivery, attrs \\ %{}) do
