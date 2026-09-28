@@ -12,6 +12,7 @@ defmodule Tidewake.Webhooks do
 
   @event_ingested [:tidewake, :webhooks, :event, :ingested]
   @event_rejected [:tidewake, :webhooks, :event, :rejected]
+  @max_stale_delivery_batch_size 100
 
   def create_event(attrs) do
     %Event{}
@@ -59,6 +60,22 @@ defmodule Tidewake.Webhooks do
   def get_delivery(id) do
     Repo.get(Delivery, id)
   end
+
+  def list_stale_delivery_ids(%DateTime{} = stale_before, limit)
+      when is_integer(limit) and limit > 0 and limit <= @max_stale_delivery_batch_size do
+    ids =
+      from(delivery in Delivery,
+        where: delivery.status == "processing" and delivery.updated_at <= ^stale_before,
+        order_by: [asc: delivery.updated_at, asc: delivery.id],
+        limit: ^limit,
+        select: delivery.id
+      )
+      |> Repo.all()
+
+    {:ok, ids}
+  end
+
+  def list_stale_delivery_ids(_stale_before, _limit), do: {:error, :invalid_arguments}
 
   def list_deliveries_for_event(%Event{} = event) do
     from(delivery in Delivery,

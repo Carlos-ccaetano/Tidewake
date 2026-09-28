@@ -599,6 +599,98 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "list_stale_delivery_ids/2" do
+    test "returns only old processing delivery IDs without loading related data" do
+      stale_before = ~U[2026-09-28 12:00:00.000000Z]
+
+      old_processing =
+        "evt_old_processing"
+        |> delivery_fixture()
+        |> put_delivery_state("processing", ~U[2026-09-28 11:55:00.000000Z])
+
+      _recent_processing =
+        "evt_recent_processing"
+        |> delivery_fixture()
+        |> put_delivery_state("processing", ~U[2026-09-28 12:00:00.000001Z])
+
+      _old_pending =
+        "evt_old_pending"
+        |> delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-09-28 11:54:00.000000Z])
+
+      _old_succeeded =
+        "evt_old_succeeded"
+        |> delivery_fixture()
+        |> put_delivery_state("succeeded", ~U[2026-09-28 11:53:00.000000Z])
+
+      handler_id = {__MODULE__, :stale_delivery_ids_query, make_ref()}
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:tidewake, :repo, :query],
+          fn _event, _measurements, metadata, test_pid ->
+            send(test_pid, {:stale_delivery_ids_query, metadata.query})
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, delivery_ids} = Webhooks.list_stale_delivery_ids(stale_before, 100)
+      assert delivery_ids == [old_processing.id]
+      assert Enum.all?(delivery_ids, &is_integer/1)
+
+      assert_receive {:stale_delivery_ids_query, query}
+      assert query =~ ~s(SELECT d0."id" FROM "deliveries" AS d0)
+      refute query =~ "events"
+      refute query =~ "endpoints"
+      refute query =~ "payload"
+    end
+
+    test "orders candidates by updated_at and then by ID" do
+      stale_before = ~U[2026-09-28 12:00:00.000000Z]
+
+      first =
+        "evt_order_first"
+        |> delivery_fixture()
+        |> put_delivery_state("processing", ~U[2026-09-28 11:50:00.000000Z])
+
+      oldest =
+        "evt_order_oldest"
+        |> delivery_fixture()
+        |> put_delivery_state("processing", ~U[2026-09-28 11:49:00.000000Z])
+
+      second =
+        "evt_order_second"
+        |> delivery_fixture()
+        |> put_delivery_state("processing", ~U[2026-09-28 11:50:00.000000Z])
+
+      assert first.id < second.id
+
+      assert {:ok, delivery_ids} = Webhooks.list_stale_delivery_ids(stale_before, 100)
+      assert delivery_ids == [oldest.id, first.id, second.id]
+    end
+
+    test "requires a valid boundary and a limit between one and 100" do
+      stale_before = ~U[2026-09-28 12:00:00.000000Z]
+
+      assert {:ok, []} = Webhooks.list_stale_delivery_ids(stale_before, 100)
+
+      for {boundary, limit} <- [
+            {stale_before, 0},
+            {stale_before, -1},
+            {stale_before, 101},
+            {stale_before, "10"},
+            {nil, 10},
+            {"2026-09-28T12:00:00Z", 10}
+          ] do
+        assert {:error, :invalid_arguments} =
+                 Webhooks.list_stale_delivery_ids(boundary, limit)
+      end
+    end
+  end
+
   describe "finalize_delivery/2" do
     test "persists a successful attempt and finalizes together" do
       delivery = delivery_fixture()
@@ -919,8 +1011,8 @@ defmodule Tidewake.WebhooksTest do
     }
   end
 
-  defp delivery_fixture do
-    event = event_fixture()
+  defp delivery_fixture(external_id \\ "evt_123") do
+    event = event_fixture(%{external_id: external_id})
     endpoint = endpoint_fixture()
     {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
     delivery
