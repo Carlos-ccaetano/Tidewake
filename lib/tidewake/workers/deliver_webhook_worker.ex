@@ -7,6 +7,20 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
 
   alias Tidewake.Webhooks.DeliveryProcessor
 
+  @delivery_job_unique [
+    fields: [:worker, :args],
+    keys: [:delivery_id],
+    period: :infinity,
+    states: :incomplete
+  ]
+
+  @doc """
+  Builds a unique job for one persisted delivery.
+  """
+  def new_for_delivery(delivery_id) when is_integer(delivery_id) and delivery_id > 0 do
+    new(%{"delivery_id" => delivery_id}, unique: @delivery_job_unique)
+  end
+
   @impl true
   def perform(%Oban.Job{args: %{"delivery_id" => id} = args})
       when is_integer(id) and id > 0 and map_size(args) == 1 do
