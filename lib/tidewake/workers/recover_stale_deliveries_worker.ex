@@ -3,7 +3,10 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorker do
   Recovers a bounded batch of deliveries abandoned in processing.
   """
 
-  use Oban.Worker, queue: :default, max_attempts: 1
+  use Oban.Worker,
+    queue: :maintenance,
+    max_attempts: 1,
+    unique: [fields: [:worker, :args], period: :infinity, states: :incomplete]
 
   alias Tidewake.Webhooks
 

@@ -14,6 +14,24 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     end)
   end
 
+  test "active maintenance jobs are unique" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first} =
+               %{}
+               |> RecoverStaleDeliveriesWorker.new()
+               |> Oban.insert()
+
+      assert {:ok, conflicting} =
+               %{}
+               |> RecoverStaleDeliveriesWorker.new()
+               |> Oban.insert()
+
+      assert conflicting.conflict?
+      assert conflicting.id == first.id
+      assert Repo.aggregate(Oban.Job, :count) == 1
+    end)
+  end
+
   test "recovers multiple old deliveries without executing them" do
     now = DateTime.utc_now()
 
@@ -119,18 +137,40 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     end)
   end
 
-  test "accepts only an empty maintenance job payload" do
+  test "builds a one-attempt maintenance job and accepts only an empty payload" do
     changeset = RecoverStaleDeliveriesWorker.new(%{})
 
     assert changeset.valid?
     job = apply_changes(changeset)
     assert job.args == %{}
-    assert job.queue == "default"
+    assert job.queue == "maintenance"
     assert job.max_attempts == 1
 
     for args <- [%{limit: 1}, %{stale_before: "2026-09-28T12:00:00Z"}] do
       assert {:cancel, :invalid_args} = perform_job(RecoverStaleDeliveriesWorker, args)
     end
+  end
+
+  test "base Oban config keeps delivery concurrency and schedules recovery every minute" do
+    oban_config = base_oban_config()
+
+    assert oban_config[:queues] == [default: 10, maintenance: 1]
+
+    assert oban_config[:cron] == [
+             crontab: [
+               {"* * * * *", RecoverStaleDeliveriesWorker}
+             ]
+           ]
+
+    assert :ok = Oban.Config.validate(oban_config)
+  end
+
+  test "test config keeps queues and plugins disabled" do
+    oban_config = Application.fetch_env!(:tidewake, Oban)
+
+    assert oban_config[:testing] == :inline
+    assert oban_config[:queues] == false
+    assert oban_config[:plugins] == false
   end
 
   defp delivery_jobs do
@@ -139,6 +179,14 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
       order_by: [asc: job.id]
     )
     |> Repo.all()
+  end
+
+  defp base_oban_config do
+    "../../../config/config.exs"
+    |> Path.expand(__DIR__)
+    |> Config.Reader.read!(env: :dev)
+    |> Keyword.fetch!(:tidewake)
+    |> Keyword.fetch!(Oban)
   end
 
   defp delivery_fixture(suffix) do
