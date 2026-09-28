@@ -36,6 +36,10 @@ defmodule TidewakeWeb.Telemetry do
         tags: [:reason],
         unit: :millisecond
       ),
+      sum("tidewake.webhooks.delivery.recovery.recovered_count"),
+      sum("tidewake.webhooks.delivery.recovery.skipped_count"),
+      sum("tidewake.webhooks.delivery.recovery.error_count"),
+      summary("tidewake.webhooks.delivery.recovery.duration_ms", unit: :millisecond),
 
       # Phoenix Metrics
       summary("phoenix.endpoint.start.system_time",

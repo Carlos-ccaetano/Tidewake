@@ -12,7 +12,11 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :delivery, :processed, :duration_ms],
     [:tidewake, :webhooks, :delivery, :cancelled, :count],
     [:tidewake, :webhooks, :delivery, :error, :count],
-    [:tidewake, :webhooks, :delivery, :error, :duration_ms]
+    [:tidewake, :webhooks, :delivery, :error, :duration_ms],
+    [:tidewake, :webhooks, :delivery, :recovery, :recovered_count],
+    [:tidewake, :webhooks, :delivery, :recovery, :skipped_count],
+    [:tidewake, :webhooks, :delivery, :recovery, :error_count],
+    [:tidewake, :webhooks, :delivery, :recovery, :duration_ms]
   ]
 
   test "defines webhook domain metrics with bounded tags" do
@@ -43,6 +47,31 @@ defmodule TidewakeWeb.TelemetryTest do
 
     assert %Summary{tags: [:reason], unit: :millisecond} =
              metric!(metrics, "tidewake.webhooks.delivery.error.duration_ms")
+
+    assert %Sum{
+             event_name: [:tidewake, :webhooks, :delivery, :recovery],
+             measurement: :recovered_count,
+             tags: []
+           } = metric!(metrics, "tidewake.webhooks.delivery.recovery.recovered_count")
+
+    assert %Sum{
+             event_name: [:tidewake, :webhooks, :delivery, :recovery],
+             measurement: :skipped_count,
+             tags: []
+           } = metric!(metrics, "tidewake.webhooks.delivery.recovery.skipped_count")
+
+    assert %Sum{
+             event_name: [:tidewake, :webhooks, :delivery, :recovery],
+             measurement: :error_count,
+             tags: []
+           } = metric!(metrics, "tidewake.webhooks.delivery.recovery.error_count")
+
+    assert %Summary{
+             event_name: [:tidewake, :webhooks, :delivery, :recovery],
+             measurement: :duration_ms,
+             tags: [],
+             unit: :millisecond
+           } = metric!(metrics, "tidewake.webhooks.delivery.recovery.duration_ms")
 
     assert metrics
            |> domain_metrics()

@@ -6,12 +6,28 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
   alias Tidewake.Webhooks.{Attempt, Delivery}
   alias Tidewake.Workers.{DeliverWebhookWorker, RecoverStaleDeliveriesWorker}
 
+  @recovery_event [:tidewake, :webhooks, :delivery, :recovery]
+
   test "completes normally when there are no candidates" do
+    attach_telemetry()
+
     Oban.Testing.with_testing_mode(:manual, fn ->
       assert :ok = perform_job(RecoverStaleDeliveriesWorker, %{})
       assert Repo.aggregate(Oban.Job, :count) == 0
       assert Repo.aggregate(Attempt, :count) == 0
     end)
+
+    assert_receive {:telemetry_event, @recovery_event,
+                    %{
+                      recovered_count: 0,
+                      skipped_count: 0,
+                      error_count: 0,
+                      duration_ms: duration_ms
+                    }, %{}}
+
+    assert is_integer(duration_ms)
+    assert duration_ms >= 0
+    refute_receive {:telemetry_event, @recovery_event, _, _}
   end
 
   test "active maintenance jobs are unique" do
@@ -72,6 +88,7 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
 
   test "ignores an active-job race without duplication and continues the batch" do
     stale_at = DateTime.add(DateTime.utc_now(), -360, :second)
+    attach_telemetry()
 
     blocked =
       "concurrent_blocked"
@@ -101,6 +118,27 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
       assert Enum.any?(jobs, &(&1.id == active_job.id))
       assert Repo.aggregate(Attempt, :count) == 0
     end)
+
+    assert_receive {:telemetry_event, @recovery_event,
+                    %{
+                      recovered_count: 1,
+                      skipped_count: 1,
+                      error_count: 0,
+                      duration_ms: duration_ms
+                    } = measurements, metadata}
+
+    assert duration_ms >= 0
+    assert metadata == %{}
+
+    assert Map.keys(measurements) |> Enum.sort() ==
+             [:duration_ms, :error_count, :recovered_count, :skipped_count]
+
+    telemetry_data = inspect({measurements, metadata})
+    refute telemetry_data =~ "endpoint.invalid"
+    refute telemetry_data =~ "order_id"
+    refute telemetry_data =~ "authorization"
+    refute telemetry_data =~ "secret"
+    refute_received {:telemetry_event, @recovery_event, _, _}
   end
 
   test "recovers at most 100 deliveries in deterministic order" do
@@ -213,5 +251,23 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     delivery
     |> change(attrs)
     |> Repo.update!()
+  end
+
+  def handle_telemetry(event_name, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry_event, event_name, measurements, metadata})
+  end
+
+  defp attach_telemetry do
+    handler_id = "delivery-recovery-worker-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @recovery_event,
+        &__MODULE__.handle_telemetry/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 end
