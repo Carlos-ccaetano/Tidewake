@@ -90,6 +90,30 @@ defmodule Tidewake.Webhooks do
     |> normalize_claim_result()
   end
 
+  def recover_stale_delivery(delivery_id, %DateTime{} = stale_before)
+      when is_integer(delivery_id) and delivery_id > 0 do
+    Repo.transaction(fn ->
+      query =
+        from(delivery in Delivery,
+          where: delivery.id == ^delivery_id,
+          lock: "FOR UPDATE"
+        )
+
+      case Repo.one(query) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delivery{status: "processing"} = delivery ->
+          recover_if_stale(delivery, stale_before)
+
+        %Delivery{} ->
+          Repo.rollback(:invalid_transition)
+      end
+    end)
+  end
+
+  def recover_stale_delivery(_delivery_id, _stale_before), do: {:error, :invalid_arguments}
+
   def finalize_delivery(delivery_id, attempt_attrs) do
     Repo.transaction(fn ->
       query = from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
@@ -224,6 +248,37 @@ defmodule Tidewake.Webhooks do
 
   defp delivery_changeset(%Event{} = event, %Endpoint{} = endpoint) do
     Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
+  end
+
+  defp recover_if_stale(delivery, stale_before) do
+    if DateTime.compare(delivery.updated_at, stale_before) in [:lt, :eq] do
+      recover_processing_delivery(delivery)
+    else
+      Repo.rollback(:not_stale)
+    end
+  end
+
+  defp recover_processing_delivery(delivery) do
+    with {:ok, recovered} <-
+           delivery
+           |> Delivery.changeset(%{
+             status: "pending",
+             completed_at: nil,
+             next_attempt_at: nil
+           })
+           |> Repo.update(),
+         {:ok, job} <-
+           delivery.id
+           |> DeliverWebhookWorker.new_for_delivery()
+           |> Oban.insert() do
+      if job.conflict? do
+        Repo.rollback(:active_job)
+      else
+        %{delivery: recovered, job: job}
+      end
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
   end
 
   defp finalize_processing_delivery(delivery, attrs) do
