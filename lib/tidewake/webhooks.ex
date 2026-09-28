@@ -51,7 +51,7 @@ defmodule Tidewake.Webhooks do
     Multi.new()
     |> Multi.run(:delivery, fn _repo, _changes -> create_delivery(event, endpoint) end)
     |> Oban.insert(:job, fn %{delivery: delivery} ->
-      initial_delivery_job(delivery)
+      DeliverWebhookWorker.new_for_delivery(delivery.id)
     end)
     |> Repo.transaction()
   end
@@ -171,7 +171,7 @@ defmodule Tidewake.Webhooks do
       |> Oban.insert(job_operation, fn changes ->
         changes
         |> Map.fetch!(delivery_operation)
-        |> initial_delivery_job()
+        |> then(&DeliverWebhookWorker.new_for_delivery(&1.id))
       end)
     end)
   end
@@ -224,12 +224,6 @@ defmodule Tidewake.Webhooks do
 
   defp delivery_changeset(%Event{} = event, %Endpoint{} = endpoint) do
     Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
-  end
-
-  defp initial_delivery_job(%Delivery{} = delivery) do
-    DeliverWebhookWorker.new(%{"delivery_id" => delivery.id},
-      unique: [fields: [:worker, :args], keys: [:delivery_id], period: :infinity, states: :all]
-    )
   end
 
   defp finalize_processing_delivery(delivery, attrs) do

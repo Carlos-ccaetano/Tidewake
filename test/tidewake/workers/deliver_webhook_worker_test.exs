@@ -7,7 +7,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
   alias Tidewake.Workers.DeliverWebhookWorker
 
   test "builds a default queue job with only the delivery ID and one attempt" do
-    changeset = DeliverWebhookWorker.new(%{"delivery_id" => 1})
+    changeset = DeliverWebhookWorker.new_for_delivery(1)
 
     assert changeset.valid?
     job = apply_changes(changeset)
@@ -17,13 +17,60 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
   end
 
+  test "rejects invalid delivery IDs" do
+    for id <- [0, -1, "1", 1.0, nil] do
+      assert_raise FunctionClauseError, fn ->
+        DeliverWebhookWorker.new_for_delivery(id)
+      end
+    end
+  end
+
+  test "active equivalent jobs conflict" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first} =
+               1
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert {:ok, conflicting} =
+               1
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert conflicting.conflict?
+      assert conflicting.id == first.id
+      assert Repo.aggregate(Oban.Job, :count) == 1
+    end)
+  end
+
+  test "a terminal job does not block future scheduling" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first} =
+               1
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert :ok = Oban.cancel_job(first)
+      assert Repo.get!(Oban.Job, first.id).state == "cancelled"
+
+      assert {:ok, rescheduled} =
+               1
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      refute rescheduled.conflict?
+      refute rescheduled.id == first.id
+      assert Repo.aggregate(Oban.Job, :count) == 2
+    end)
+  end
+
   test "executes through Oban inline mode using the configured deterministic adapter" do
     delivery = delivery_fixture()
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
-               %{delivery_id: delivery.id}
-               |> DeliverWebhookWorker.new()
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
                |> Oban.insert()
 
       assert job.state == "completed"
@@ -85,8 +132,8 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
-               %{delivery_id: 2_147_483_647}
-               |> DeliverWebhookWorker.new()
+               2_147_483_647
+               |> DeliverWebhookWorker.new_for_delivery()
                |> Oban.insert()
 
       assert job.state == "cancelled"
@@ -103,8 +150,8 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
-               %{delivery_id: delivery.id}
-               |> DeliverWebhookWorker.new()
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
                |> Oban.insert()
 
       assert job.state == "discarded"
@@ -120,8 +167,8 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
-               %{delivery_id: delivery.id}
-               |> DeliverWebhookWorker.new()
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
                |> Oban.insert()
 
       assert job.state == "completed"
@@ -146,8 +193,8 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
-               %{delivery_id: delivery.id}
-               |> DeliverWebhookWorker.new()
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
                |> Oban.insert()
 
       assert job.state == "completed"
