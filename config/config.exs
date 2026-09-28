@@ -13,7 +13,12 @@ config :tidewake,
 
 config :tidewake, Oban,
   repo: Tidewake.Repo,
-  queues: [default: 10]
+  queues: [default: 10, maintenance: 1],
+  cron: [
+    crontab: [
+      {"* * * * *", Tidewake.Workers.RecoverStaleDeliveriesWorker}
+    ]
+  ]
 
 # Configure the endpoint
 config :tidewake, TidewakeWeb.Endpoint,
