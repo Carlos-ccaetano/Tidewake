@@ -31,7 +31,7 @@ Implemented:
 - `POST /api/events` for validation and atomic persistence of the event, its fan-out deliveries, and initial jobs;
 - `GET /api/events/:id` for individual event retrieval;
 - `GET /api/events/:id/deliveries` for the event's ordered delivery status without endpoint configuration, payloads, or attempts;
-- static Bearer token authentication for every `/api` route, with validated production configuration and a stable unauthorized response;
+- shared static Bearer token authentication for every `/api` route, with a recognizable non-production development value, a required production `TIDEWAKE_API_TOKEN` of at least 32 bytes, and a stable `401 Unauthorized` response with `WWW-Authenticate: Bearer`;
 - tests for event validation, persistence, duplicate ingestion, rollback boundaries, fan-out, and the implemented HTTP operations;
 - atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
 - an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
@@ -92,9 +92,11 @@ Planned:
 - threat model and security review;
 - load and failure testing;
 - database backup and recovery guidance;
-- secret rotation;
+- automatic API token and secret rotation;
 - retention jobs;
 - deployment and rollback documentation;
 - service-level indicators and alert thresholds.
 
 The order may change when evidence from earlier milestones reveals a better boundary.
+
+The implemented shared token is an authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, and multiple simultaneous tokens remain future identity and access work; they are not prerequisites for considering the current static token authentication implemented.

@@ -20,6 +20,25 @@ Ironhold may be one external endpoint:
 
 Ironhold remains an independent system and repository. Tidewake must not depend on Ironhold internals.
 
+## API authentication boundary
+
+Every current route under `/api` passes through `TidewakeWeb.Plugs.RequireApiToken` in the Phoenix `:api` pipeline and requires exactly one `Authorization: Bearer <token>` header. The plug authenticates callers against one configured static token; it does not identify users or authorize access by project.
+
+Development defaults to the recognizable non-production value `dev-only-api-token-not-for-production`. Production requires `TIDEWAKE_API_TOKEN` with at least 32 bytes and has no default or fallback. Real token values must stay outside source control and documentation.
+
+Missing, malformed, duplicated, or invalid credentials are halted before controller or domain operations with `401 Unauthorized`, `WWW-Authenticate: Bearer`, and the same public JSON response:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Valid API token required"
+  }
+}
+```
+
+Users, sessions, OAuth, JWT, project-level authorization, multiple simultaneous tokens, and automatic token rotation remain future work. The static shared token is an initial authentication boundary, not a complete identity or authorization system.
+
 ## Intended flow
 
 1. A client submits an event with an idempotency key.
@@ -115,7 +134,7 @@ The processor records successful, HTTP error, and transport error attempts. `Res
 Additional responsibilities and namespaces may emerge as behavior is implemented:
 
 - Tidewake.Projects for ownership;
-- user identities, project-level authorization, and API credential rotation or replacement;
+- users, sessions, OAuth, JWT, project-level authorization, and automatic API token rotation or replacement;
 - recovery of deliveries stuck in `processing`;
 - SSRF-safe destination validation and a hard response-consumption limit before activating the Req adapter;
 - Tidewake.Security for HMAC signing and secret handling;
