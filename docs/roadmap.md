@@ -18,7 +18,7 @@ No webhook delivery behavior is part of this milestone.
 
 ## Milestone 1: first vertical slice
 
-Status: in progress
+Status: complete
 
 Goal: prove the smallest durable workflow.
 
@@ -43,14 +43,14 @@ Implemented:
 - tests for transactional scheduling, rollback, and complete success and persisted-failure cycles through the worker;
 - a Req-backed adapter with explicit timeouts, redirects and internal retries disabled, implemented and tested in isolation without activation;
 - transactional fan-out to active endpoints in increasing ID order, creating one delivery and one initial job per destination;
-- bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, and controlled processing errors;
-- declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, and controlled error reasons and duration.
+- periodic recovery, every minute, of deliveries left in `processing` for at least five minutes;
+- a deterministic oldest-first recovery batch limited to 100 delivery IDs, processed serially on a dedicated maintenance queue;
+- row-locked revalidation and transactional replacement-job creation while returning stale work to `pending`;
+- preservation of `attempt_count` and omission of an attempt when no outbound result was confirmed, with documented at-least-once resend risk;
+- bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, controlled processing errors, and recovery batches;
+- declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, controlled error reasons and duration, and recovered, skipped, and controlled-error recovery counts plus batch duration.
 
-Pending acceptance work:
-
-- recover deliveries left in `processing` after execution, malformed-response, or persistence failures.
-
-This milestone is not complete. Transactional ingestion, fan-out, status visibility, delivery-time cancellation, API authentication, and bounded observability are implemented, but recovery of deliveries stuck in `processing` remains an acceptance gap. No real external delivery is enabled: the Req adapter still awaits SSRF protection and a hard response-byte limit before activation, HMAC signing remains planned in Milestone 2, and retries and backoff remain in Milestone 3.
+This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Completion does not enable real external delivery: complete SSRF protection, a hard response-byte limit, and activation of the Req adapter remain in Milestone 2 alongside project ownership and HMAC signing; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production readiness remains in Milestone 5.
 
 ## Milestone 2: endpoints and signed delivery
 
