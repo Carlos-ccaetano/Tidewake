@@ -2,9 +2,11 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` does not mean a webhook was sent or delivered. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record local delivery outcomes, bounded Telemetry events cover ingestion, processing, and cancellation, and declarative domain metrics are available.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` does not mean a webhook was sent or delivered. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record local delivery outcomes, periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, cancellation, and recovery, and declarative domain metrics are available.
 
-The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter. Every `/api` route now requires a configured static Bearer token. Users, project-level authorization, automatic token rotation, retries and backoff, HMAC signing, recovery of deliveries stuck in `processing`, audit records, and the operational LiveView remain pending.
+Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
+
+The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter, so the completed first delivery slice does not send external webhooks. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, activation of the Req transport, retries and backoff, HMAC signing, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending.
 
 ## Relationship with Ironhold
 
@@ -153,12 +155,12 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint, event, delivery, attempt, and transactional fan-out persistence lives in `Tidewake.Webhooks`. Ingestion and processing emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, `Tidewake.Observability`, and `Tidewake.Workers`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, transactional fan-out, and stale-delivery recovery persistence lives in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
-2. First vertical slice: event ingestion, persistence, an Oban job, and a recorded attempt.
+2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
 3. Signed delivery, retries, and idempotency.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
