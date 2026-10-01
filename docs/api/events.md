@@ -6,6 +6,8 @@ Event ingestion and the HTTP operations to create and retrieve individual events
 
 Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. Outbound HTTP activation, signing, and retries remain pending.
 
+An Oban worker runs every minute to recover at most 100 deliveries left in `processing` for at least five minutes. Each eligible delivery returns to `pending` with a replacement job, without creating a new attempt or changing `attempt_count`. This preserves at-least-once processing semantics: work may run again when its previous outcome was not persisted. Each recovery batch emits Telemetry with recovered, skipped, and error counts plus its duration.
+
 ## Operations
 
 | Method | Path | Purpose |
@@ -262,8 +264,7 @@ Returned when the event does not exist or the path value is invalid, negative, o
 - Activation of outbound HTTP requests with Req.
 - HMAC signing.
 - Retries and backoff.
-- Recovery of deliveries left in `processing`.
 - Users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token.
 - Event listing, updates, and deletion.
 
-These capabilities remain pending. Deterministic local processing and cancellation do not mean that external webhook delivery, retries, or recovery are active.
+These capabilities remain pending. Deterministic local processing, cancellation, and stale-delivery recovery do not mean that external webhook delivery, retries, or backoff are active.
