@@ -7,6 +7,13 @@ config :tidewake,
        :api_token,
        System.get_env("TIDEWAKE_API_TOKEN", "dev-only-api-token-not-for-production")
 
+config :tidewake,
+       :webhook_signing_secret,
+       System.get_env(
+         "TIDEWAKE_WEBHOOK_SIGNING_SECRET",
+         "dev-only-webhook-signing-secret-not-for-production"
+       )
+
 config :tidewake, Tidewake.Repo,
   username: System.get_env("POSTGRES_USER", "postgres"),
   password: System.get_env("POSTGRES_PASSWORD", "postgres"),
