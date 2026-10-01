@@ -51,6 +51,16 @@ if config_env() == :prod do
 
   config :tidewake, :api_token, api_token
 
+  webhook_signing_secret =
+    System.get_env("TIDEWAKE_WEBHOOK_SIGNING_SECRET") ||
+      raise "environment variable TIDEWAKE_WEBHOOK_SIGNING_SECRET is missing"
+
+  if byte_size(webhook_signing_secret) < 32 do
+    raise "environment variable TIDEWAKE_WEBHOOK_SIGNING_SECRET must be at least 32 bytes"
+  end
+
+  config :tidewake, :webhook_signing_secret, webhook_signing_secret
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
