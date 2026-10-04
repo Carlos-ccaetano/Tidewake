@@ -6,7 +6,9 @@ The project is still early-stage, but it is no longer only a foundation. The Pho
 
 Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
 
-The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed. Tests continue to configure the deterministic adapter, so the completed first delivery slice does not send external webhooks. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, activation of the Req transport, retries and backoff, HMAC signing, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending.
+For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once, and signs those exact bytes. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
+
+Tests continue to configure the deterministic adapter as the current default; it simulates a 204 response without I/O. The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed, so production does not send webhooks over the network. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, activation of the Req transport, retries and backoff, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
 
 ## Relationship with Ironhold
 
@@ -22,7 +24,7 @@ This repository does not contain or modify Ironhold.
 
 Tidewake currently accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. This durable fan-out is not proof of an outbound HTTP delivery. The broader architecture will eventually:
 
-- send signed webhook requests with Req;
+- activate outbound HTTP requests with Req after its destination and response-size safeguards are complete;
 - retry transient failures with exponential backoff;
 - enforce idempotency at the delivery boundary;
 - expose operational history through Phoenix LiveView;
@@ -119,13 +121,14 @@ Local configuration supports:
 | Variable | Local default | Purpose |
 | --- | --- | --- |
 | TIDEWAKE_API_TOKEN | dev-only-api-token-not-for-production | Static Bearer token for `/api`; this public local value is not for production. |
+| TIDEWAKE_WEBHOOK_SIGNING_SECRET | dev-only-webhook-signing-secret-not-for-production | Secret used to prepare webhook signing headers; this public local value is not for production. |
 | POSTGRES_USER | postgres | PostgreSQL user |
 | POSTGRES_PASSWORD | postgres | Local-only PostgreSQL password |
 | POSTGRES_DB | tidewake_dev | Development database |
 | POSTGRES_HOST | localhost | Database host |
 | POSTGRES_PORT | 5432 | Database port |
 
-Production additionally requires DATABASE_URL, SECRET_KEY_BASE, and a `TIDEWAKE_API_TOKEN` of at least 32 bytes. PHX_HOST and PORT configure the public endpoint. Never commit a populated .env file or real credentials.
+Production additionally requires DATABASE_URL, SECRET_KEY_BASE, a `TIDEWAKE_API_TOKEN` of at least 32 bytes, and a `TIDEWAKE_WEBHOOK_SIGNING_SECRET` of at least 32 bytes. PHX_HOST and PORT configure the public endpoint. Never commit a populated .env file or real credentials.
 
 ## Quality checks
 
@@ -155,13 +158,13 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint, event, delivery, attempt, transactional fan-out, and stale-delivery recovery persistence lives in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects`, `Tidewake.Security`, and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, transactional fan-out, stale-delivery recovery, envelope encoding, and signature generation live in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Signed delivery, retries, and idempotency.
+3. Outbound HTTP delivery, retries, and idempotency hardening.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 

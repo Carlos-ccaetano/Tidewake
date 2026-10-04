@@ -4,7 +4,9 @@
 
 Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Every route under `/api`, including these event operations, requires the configured static API token. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
 
-Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. Outbound HTTP activation, signing, and retries remain pending.
+Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. During deterministic delivery processing, the configured signing secret is validated before claim, the envelope is serialized once, and its exact bytes are signed. The processor prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` with `content-type: application/json` and passes the same body to the adapter. The secret, signature, and signing timestamp are not persisted.
+
+Tests continue to configure the deterministic adapter as the current default; it performs no network I/O. Req is inactive, so there is no production HTTP delivery. SSRF protection, a hard response-byte limit, retries, and backoff remain pending. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
 
 An Oban worker runs every minute to recover at most 100 deliveries left in `processing` for at least five minutes. Each eligible delivery returns to `pending` with a replacement job, without creating a new attempt or changing `attempt_count`. This preserves at-least-once processing semantics: work may run again when its previous outcome was not persisted. Each recovery batch emits Telemetry with recovered, skipped, and error counts plus its duration.
 
@@ -261,10 +263,10 @@ Returned when the event does not exist or the path value is invalid, negative, o
 
 - Endpoint management operations, documented separately in the [endpoint management API](endpoints.md).
 - Delivery mutation and attempt retrieval through this API; only delivery status listing is available.
-- Activation of outbound HTTP requests with Req.
-- HMAC signing.
+- Activation of outbound HTTP requests with Req, including complete SSRF protection and a hard response-byte limit.
 - Retries and backoff.
+- Receiver-side signature verification, timestamp validation, and replay protection.
 - Users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token.
 - Event listing, updates, and deletion.
 
-These capabilities remain pending. Deterministic local processing, cancellation, and stale-delivery recovery do not mean that external webhook delivery, retries, or backoff are active.
+Deterministic local processing, signing-header preparation, cancellation, and stale-delivery recovery do not mean that external webhook delivery, retries, or backoff are active.
