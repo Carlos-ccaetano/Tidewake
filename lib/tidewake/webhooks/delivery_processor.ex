@@ -8,8 +8,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   """
 
   alias Tidewake.Webhooks
-  alias Tidewake.Webhooks.Envelope
-  alias Tidewake.Webhooks.ResponseMetadata
+  alias Tidewake.Webhooks.{Envelope, ResponseMetadata, Signature}
 
   @delivery_cancelled [:tidewake, :webhooks, :delivery, :cancelled]
   @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
@@ -25,13 +24,17 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   end
 
   defp process_delivery(delivery_id, adapter) do
-    with {:ok, delivery} <- Webhooks.claim_delivery(delivery_id),
-         {:ok, body} <- Envelope.encode(delivery.event) do
+    with {:ok, secret} <- signing_secret(),
+         {:ok, delivery} <- Webhooks.claim_delivery(delivery_id),
+         {:ok, body} <- Envelope.encode(delivery.event),
+         timestamp = System.system_time(:second),
+         {:ok, signature_headers} <-
+           Signature.headers(delivery.event.external_id, timestamp, body, secret) do
       started_at = DateTime.utc_now()
       started = System.monotonic_time(:millisecond)
+      headers = [{"content-type", "application/json"} | signature_headers]
 
-      result =
-        adapter.deliver(delivery.endpoint.url, body, [{"content-type", "application/json"}])
+      result = adapter.deliver(delivery.endpoint.url, body, headers)
 
       duration_ms = System.monotonic_time(:millisecond) - started
       completed_at = DateTime.utc_now()
@@ -118,8 +121,16 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   defp processing_error_reason(:invalid_transition), do: "invalid_transition"
   defp processing_error_reason(:invalid_adapter_response), do: "invalid_adapter_response"
   defp processing_error_reason(:invalid_json), do: "encoding"
+  defp processing_error_reason(:invalid_signing_configuration), do: "signing_configuration"
   defp processing_error_reason(%Ecto.Changeset{}), do: "persistence"
   defp processing_error_reason(_reason), do: "unknown"
+
+  defp signing_secret do
+    case Application.fetch_env(:tidewake, :webhook_signing_secret) do
+      {:ok, secret} when is_binary(secret) and byte_size(secret) >= 32 -> {:ok, secret}
+      _invalid -> {:error, :invalid_signing_configuration}
+    end
+  end
 
   defp transport_error_type(:timeout), do: "timeout"
   defp transport_error_type(:dns_error), do: "dns"
