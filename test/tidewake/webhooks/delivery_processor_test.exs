@@ -17,6 +17,19 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     Process.get(:adapter_response, {:ok, %{status: 204, headers: [{"set-cookie", "secret"}]}})
   end
 
+  setup do
+    signing_secret = Application.fetch_env(:tidewake, :webhook_signing_secret)
+
+    on_exit(fn ->
+      case signing_secret do
+        {:ok, secret} -> Application.put_env(:tidewake, :webhook_signing_secret, secret)
+        :error -> Application.delete_env(:tidewake, :webhook_signing_secret)
+      end
+    end)
+
+    :ok
+  end
+
   describe "telemetry" do
     for {label, response, outcome} <- [
           {"success", {:ok, %{status: 204, headers: [{"set-cookie", "header-secret"}]}},
@@ -42,8 +55,9 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         delivery = delivery_fixture()
         Process.put(:adapter_response, response)
 
-        assert {:ok, %{delivery: finalized, attempt: attempt}} =
-                 DeliveryProcessor.process(delivery.id, __MODULE__)
+        result = DeliveryProcessor.process(delivery.id, __MODULE__)
+        assert {:ok, %{delivery: finalized, attempt: attempt}} = result
+        assert_received {:delivered, _, _, request_headers}
 
         assert attempt.result == outcome
         assert Webhooks.get_delivery(delivery.id) == finalized
@@ -59,6 +73,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         assert Map.keys(metadata) == [:outcome]
 
         telemetry_data = inspect({measurements, metadata})
+        signing_timestamp = header(request_headers, "Tidewake-Timestamp")
+        signature = header(request_headers, "Tidewake-Signature")
         refute Map.has_key?(measurements, :delivery_id)
         refute Map.has_key?(metadata, :delivery_id)
         refute telemetry_data =~ "endpoint.invalid"
@@ -67,6 +83,10 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         refute telemetry_data =~ "secret-request-id"
         refute telemetry_data =~ "secret-response-body"
         refute telemetry_data =~ "internal_adapter_detail"
+        refute telemetry_data =~ signing_timestamp
+        refute telemetry_data =~ signature
+        refute inspect(result) =~ Application.fetch_env!(:tidewake, :webhook_signing_secret)
+        refute telemetry_data =~ Application.fetch_env!(:tidewake, :webhook_signing_secret)
         refute_received {:telemetry_event, @delivery_error, _, _}
       end
     end
@@ -149,24 +169,93 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert attempt.response_metadata == nil
   end
 
-  test "passes the associated endpoint, envelope and content type without persisting headers" do
+  test "passes the exact signed envelope and all prepared headers without persisting them" do
     delivery = delivery_fixture()
     event = Webhooks.get_event(delivery.event_id)
     endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+    before_processing = System.system_time(:second)
 
     assert {:ok, %{attempt: attempt}} = DeliveryProcessor.process(delivery.id, __MODULE__)
 
-    assert_received {:delivered, url, body, [{"content-type", "application/json"}]}
+    after_processing = System.system_time(:second)
+    assert_received {:delivered, url, body, headers}
     assert url == endpoint.url
 
-    assert Jason.decode!(body) == %{
+    envelope = Jason.decode!(body)
+
+    assert envelope == %{
              "id" => event.external_id,
              "type" => event.event_type,
              "data" => event.payload
            }
 
+    assert headers |> Enum.map(&elem(&1, 0)) |> Enum.sort() ==
+             ["Tidewake-Id", "Tidewake-Signature", "Tidewake-Timestamp", "content-type"]
+
+    assert header(headers, "content-type") == "application/json"
+    assert header(headers, "Tidewake-Id") == envelope["id"]
+
+    timestamp = header(headers, "Tidewake-Timestamp")
+    assert timestamp =~ ~r/^\d+$/
+    assert String.to_integer(timestamp) in before_processing..after_processing
+
+    canonical = IO.iodata_to_binary(["v1.", event.external_id, ".", timestamp, ".", body])
+
+    expected_signature =
+      :crypto.mac(
+        :hmac,
+        :sha256,
+        Application.fetch_env!(:tidewake, :webhook_signing_secret),
+        canonical
+      )
+      |> Base.encode16(case: :lower)
+      |> then(&("v1=" <> &1))
+
+    assert header(headers, "Tidewake-Signature") == expected_signature
+
     assert attempt.response_metadata == nil
     assert Webhooks.get_event(event.id) == event
+
+    persisted_data = inspect({Webhooks.get_delivery(delivery.id), attempt})
+    refute persisted_data =~ timestamp
+    refute persisted_data =~ expected_signature
+  end
+
+  test "rejects missing signing configuration before claiming or delivering" do
+    attach_telemetry(@delivery_error)
+    delivery = delivery_fixture()
+    Application.delete_env(:tidewake, :webhook_signing_secret)
+
+    result = DeliveryProcessor.process(delivery.id, __MODULE__)
+
+    assert result == {:error, :invalid_signing_configuration}
+    assert_pending_without_attempt(delivery)
+    refute_received {:delivered, _, _, _}
+
+    assert_received {:telemetry_event, @delivery_error, measurements,
+                     %{reason: "signing_configuration"} = metadata}
+
+    assert measurements.count == 1
+    refute inspect({result, measurements, metadata}) =~ "webhook_signing_secret"
+  end
+
+  test "rejects an invalid signing secret without exposing it or advancing state" do
+    attach_telemetry(@delivery_error)
+    delivery = delivery_fixture()
+    invalid_secret = "invalid-secret-must-not-leak"
+    Application.put_env(:tidewake, :webhook_signing_secret, invalid_secret)
+
+    result = DeliveryProcessor.process(delivery.id, __MODULE__)
+
+    assert result == {:error, :invalid_signing_configuration}
+    assert_pending_without_attempt(delivery)
+    refute_received {:delivered, _, _, _}
+
+    assert_received {:telemetry_event, @delivery_error, measurements,
+                     %{reason: "signing_configuration"} = metadata}
+
+    assert measurements.count == 1
+    refute inspect({result, measurements, metadata}) =~ invalid_secret
   end
 
   test "cancels an inactive endpoint without encoding, delivering or creating an attempt" do
@@ -491,6 +580,19 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       )
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp assert_pending_without_attempt(delivery) do
+    persisted = Webhooks.get_delivery(delivery.id)
+    assert persisted.status == "pending"
+    assert persisted.attempt_count == 0
+    assert persisted.completed_at == nil
+    assert Webhooks.list_attempts(delivery) == []
+  end
+
+  defp header(headers, name) do
+    {^name, value} = List.keyfind(headers, name, 0)
+    value
   end
 
   defp delivery_fixture do
