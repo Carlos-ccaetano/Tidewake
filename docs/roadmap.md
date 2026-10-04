@@ -50,9 +50,9 @@ Implemented:
 - bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, controlled processing errors, and recovery batches;
 - declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, controlled error reasons and duration, and recovered, skipped, and controlled-error recovery counts plus batch duration.
 
-This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Completion does not enable real external delivery: complete SSRF protection, a hard response-byte limit, and activation of the Req adapter remain in Milestone 2 alongside project ownership and HMAC signing; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production readiness remains in Milestone 5.
+This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Completion does not enable real external delivery: complete SSRF protection, a hard response-byte limit, activation of the Req adapter, and project ownership remain in Milestone 2; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production readiness remains in Milestone 5.
 
-## Milestone 2: endpoints and signed delivery
+## Milestone 2: endpoints and outbound delivery
 
 Status: in progress
 
@@ -60,16 +60,18 @@ Completed:
 
 - endpoint model and persistence, including schema validation and context operations.
 - HTTP management API for endpoint creation, listing, retrieval, and updates, including deactivation with `active: false`.
+- production-validated configuration for the webhook signing secret, with explicit local and test values;
+- versioned HMAC-SHA256 headers generated from the event's public ID, attempt timestamp, exact body bytes, and configured secret;
+- single-pass envelope serialization and preparation of `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` before the deterministic adapter is invoked, without persisting the secret, signature, or timestamp.
 
-The Req adapter exists and is tested, but it is not activated as the configured delivery transport.
+Tests continue to configure the deterministic adapter as the current default. The Req adapter exists and is tested, but it is not activated as the delivery transport, so production does not send webhooks over the network. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
 
 Planned:
 
 - associate endpoints with projects;
 - implement complete destination protection against SSRF and a hard bound on response bytes actually received;
 - activate the Req adapter only after those safeguards exist;
-- sign exact request bytes with versioned HMAC headers;
-- test signatures and the safeguards required for activated external transport.
+- test the safeguards required for activated external transport.
 
 ## Milestone 3: retry and idempotency hardening
 
