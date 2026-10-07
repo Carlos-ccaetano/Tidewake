@@ -2,9 +2,10 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   @moduledoc """
   Processes HTTP delivery outcomes using a supplied delivery adapter.
 
-  Returns the finalized delivery and attempt, or a controlled error. Execution
-  or persistence errors after claim leave the delivery in processing; recovery
-  is not implemented.
+  Returns the finalized delivery and attempt, or a controlled error. Unexpected
+  errors after claim can leave a delivery in `processing`. Periodic stale-delivery
+  recovery can return it to `pending`, so a later execution may resend a request
+  whose result was not persisted. This provides at-least-once delivery semantics.
   """
 
   alias Tidewake.Webhooks
