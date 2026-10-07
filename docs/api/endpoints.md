@@ -4,9 +4,9 @@
 
 Endpoint persistence and the endpoint management HTTP API are implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema persist endpoint data, while the `Tidewake.Webhooks` context and HTTP controller provide operations to list, retrieve, create, and update endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
 
-Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint, and its worker and processor support deterministic local processing, persisted attempts and local results, and Telemetry.
+Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint. For an active endpoint, the processor signs the exact serialized envelope before passing it to the configured adapter. If the endpoint is inactive when the delivery is claimed, Tidewake cancels the delivery without invoking the adapter or creating an attempt. A periodic worker returns stale deliveries left in `processing` to `pending` for another execution.
 
-A Req-based adapter is implemented, but it is not configured as the active transport. Tidewake therefore does not perform external HTTP webhook delivery in production yet. Every route under `/api`, including endpoint management, requires the configured static API token.
+The configured adapter remains deterministic and local. A Req-based adapter is implemented, but it is not active, so Tidewake does not perform external HTTP webhook delivery in production. Persisted outcomes and bounded Telemetry cover the current local processing, cancellation, and recovery paths. Every route under `/api`, including endpoint management, requires the configured static API token.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -261,13 +261,11 @@ Error responses must not expose database details or stack traces.
 The following capabilities remain outside the current implementation:
 
 - users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token;
+- project ownership for endpoints and events;
 - production activation and configuration of external HTTP webhook delivery through the Req adapter;
 - SSRF protection for outbound destinations;
 - enforcement of a real response-body byte limit;
-- HMAC signing;
 - retry and backoff policies;
-- recovery for interrupted or stranded delivery processing;
-- a policy for deliveries already scheduled when an endpoint is deactivated; deactivation prevents the endpoint from participating in new fan-outs, but does not yet define how those scheduled deliveries are handled;
 - pagination;
 - advanced filtering;
 - endpoint health checks;
