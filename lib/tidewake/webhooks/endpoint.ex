@@ -3,6 +3,8 @@ defmodule Tidewake.Webhooks.Endpoint do
 
   import Ecto.Changeset
 
+  @max_url_bytes 2_048
+
   schema "endpoints" do
     field :name, :string
     field :url, :string
@@ -17,6 +19,7 @@ defmodule Tidewake.Webhooks.Endpoint do
     |> validate_required([:name, :url])
     |> validate_non_blank_name()
     |> validate_length(:name, max: 255)
+    |> validate_url_byte_length()
     |> validate_url()
   end
 
@@ -33,6 +36,14 @@ defmodule Tidewake.Webhooks.Endpoint do
       else
         [url: "must be a valid HTTP or HTTPS URL"]
       end
+    end)
+  end
+
+  defp validate_url_byte_length(changeset) do
+    validate_change(changeset, :url, fn :url, url ->
+      if byte_size(url) <= @max_url_bytes,
+        do: [],
+        else: [url: "must be at most #{@max_url_bytes} bytes"]
     end)
   end
 
