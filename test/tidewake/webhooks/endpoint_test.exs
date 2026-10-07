@@ -132,6 +132,37 @@ defmodule Tidewake.Webhooks.EndpointTest do
       assert changeset.valid?
     end
 
+    test "accepts a URL with exactly 2,048 bytes" do
+      base_url = "https://example.com/"
+      url = base_url <> String.duplicate("a", 2_048 - byte_size(base_url))
+
+      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+
+      assert byte_size(url) == 2_048
+      assert changeset.valid?
+    end
+
+    test "rejects a URL with 2,049 bytes" do
+      base_url = "https://example.com/"
+      url = base_url <> String.duplicate("a", 2_049 - byte_size(base_url))
+
+      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+
+      assert byte_size(url) == 2_049
+      assert "must be at most 2048 bytes" in errors_on(changeset).url
+    end
+
+    test "measures multibyte URLs in bytes" do
+      base_url = "https://example.com/"
+      url = base_url <> String.duplicate("é", 1_014) <> "a"
+
+      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+
+      assert String.length(url) < 2_048
+      assert byte_size(url) == 2_049
+      assert "must be at most 2048 bytes" in errors_on(changeset).url
+    end
+
     test "rejects a URL containing userinfo credentials" do
       changeset =
         Endpoint.changeset(%Endpoint{}, %{

@@ -2,7 +2,7 @@
 
 ## Status
 
-Endpoint persistence and the endpoint management HTTP API are implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema persist endpoint data, while the `Tidewake.Webhooks` context and HTTP controller provide operations to list, retrieve, create, and update endpoints. The schema validates that names are present and non-blank and that URLs are present and use HTTP or HTTPS.
+Endpoint persistence and the endpoint management HTTP API are implemented. The `endpoints` table and the `Tidewake.Webhooks.Endpoint` schema persist endpoint data, while the `Tidewake.Webhooks` context and HTTP controller provide operations to list, retrieve, create, and update endpoints. The schema validates that names are present and non-blank and that URLs are present, use HTTP or HTTPS, and contain at most 2,048 bytes.
 
 Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint. For an active endpoint, the processor signs the exact serialized envelope before passing it to the configured adapter. If the endpoint is inactive when the delivery is claimed, Tidewake cancels the delivery without invoking the adapter or creating an attempt. A periodic worker returns stale deliveries left in `processing` to `pending` for another execution.
 
@@ -92,7 +92,7 @@ Request body:
 Initial validation rules:
 
 - `name` is required and cannot be blank.
-- `url` is required and must be a valid HTTP or HTTPS URL.
+- `url` is required, must be a valid HTTP or HTTPS URL, and may contain at most 2,048 bytes. The changeset enforces this application limit; the PostgreSQL column remains `text` and does not provide it.
 - `active` defaults to `true`.
 - Unknown fields are ignored by the endpoint changeset.
 
