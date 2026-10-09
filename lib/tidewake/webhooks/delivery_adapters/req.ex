@@ -9,6 +9,10 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
 
   @behaviour Tidewake.Webhooks.DeliveryAdapter
 
+  alias Tidewake.Webhooks.DeliveryAdapters.ResponseLimiter
+
+  @max_response_bytes 65_536
+
   @request_options [
     method: :post,
     retry: false,
@@ -25,16 +29,12 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
   def deliver(url, body, headers) do
     options =
       Application.get_env(:tidewake, __MODULE__, [])
-      |> Keyword.merge(@request_options)
+      |> Keyword.merge(request_options())
       |> Keyword.merge(url: url, body: body, headers: headers)
 
     case Elixir.Req.request(options) do
       {:ok, %Elixir.Req.Response{} = response} ->
-        {:ok,
-         %{
-           status: response.status,
-           headers: Elixir.Req.get_headers_list(response)
-         }}
+        normalize_response(response)
 
       {:error, %Elixir.Req.TransportError{reason: reason}} ->
         {:error, normalize_transport_error(reason)}
@@ -44,6 +44,22 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
 
       {:error, exception} ->
         raise exception
+    end
+  end
+
+  defp request_options do
+    Keyword.put(@request_options, :into, ResponseLimiter.into(@max_response_bytes))
+  end
+
+  defp normalize_response(response) do
+    if ResponseLimiter.exceeded?(response) do
+      {:error, :response_too_large}
+    else
+      {:ok,
+       %{
+         status: response.status,
+         headers: Elixir.Req.get_headers_list(response)
+       }}
     end
   end
 
