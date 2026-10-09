@@ -138,6 +138,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   defp transport_error_type(:tls_error), do: "tls"
   defp transport_error_type(:connection_refused), do: "connection"
   defp transport_error_type(:connection_closed), do: "closed"
+  defp transport_error_type(:unsafe_destination), do: "destination"
+  defp transport_error_type(:response_too_large), do: "response_limit"
   defp transport_error_type(_reason), do: "unknown"
 
   defp valid_headers?([]), do: true

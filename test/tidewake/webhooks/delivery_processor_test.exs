@@ -505,6 +505,70 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     end
   end
 
+  for {reason, error_type} <- [
+        unsafe_destination: "destination",
+        response_too_large: "response_limit"
+      ] do
+    test "persists and observes #{reason} as #{error_type} without destination data" do
+      reason = unquote(reason)
+      error_type = unquote(error_type)
+      attach_telemetry(@delivery_processed)
+      attach_telemetry(@delivery_error)
+
+      destination_hostname = "sensitive-destination.invalid"
+      destination_ip = "203.0.113.77"
+
+      destination_url =
+        "https://#{destination_hostname}/private?resolved_ip=#{destination_ip}&token=destination-secret"
+
+      delivery = delivery_fixture(destination_url)
+      Process.put(:adapter_response, {:error, reason})
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               DeliveryProcessor.process(delivery.id, __MODULE__)
+
+      assert_received {:delivered, ^destination_url, request_body, request_headers}
+      assert finalized.status == "failed"
+      assert finalized.attempt_count == 1
+      assert finalized.completed_at == attempt.completed_at
+      assert attempt.delivery_id == delivery.id
+      assert attempt.attempt_number == 1
+      assert attempt.result == "transport_error"
+      assert attempt.error_type == error_type
+      assert attempt.http_status == nil
+      assert attempt.response_metadata == nil
+      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.list_attempts(delivery) == [attempt]
+
+      assert_received {:telemetry_event, @delivery_processed,
+                       %{count: 1, duration_ms: duration_ms} = measurements,
+                       %{outcome: "transport_error"} = metadata}
+
+      assert is_integer(duration_ms)
+      assert duration_ms >= 0
+      assert Map.keys(measurements) |> Enum.sort() == [:count, :duration_ms]
+      assert Map.keys(metadata) == [:outcome]
+      refute_received {:telemetry_event, @delivery_error, _, _}
+
+      persisted_data = inspect({finalized, attempt, Webhooks.list_attempts(delivery)})
+      telemetry_data = inspect({measurements, metadata})
+      raw_reason = Atom.to_string(reason)
+      signature = header(request_headers, "Tidewake-Signature")
+
+      for prohibited <- [
+            destination_url,
+            destination_hostname,
+            destination_ip,
+            request_body,
+            raw_reason,
+            signature
+          ] do
+        refute persisted_data =~ prohibited
+        refute telemetry_data =~ prohibited
+      end
+    end
+  end
+
   test "returns a changeset error when transport failure finalization cannot insert the attempt" do
     attach_telemetry(@delivery_processed)
     attach_telemetry(@delivery_error)
@@ -595,7 +659,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     value
   end
 
-  defp delivery_fixture do
+  defp delivery_fixture(endpoint_url \\ "https://endpoint.invalid/webhooks") do
     {:ok, event} =
       Webhooks.create_event(%{
         external_id: "evt_processor",
@@ -606,7 +670,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     {:ok, endpoint} =
       Webhooks.create_endpoint(%{
         name: "Local validation",
-        url: "https://endpoint.invalid/webhooks"
+        url: endpoint_url
       })
 
     {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
