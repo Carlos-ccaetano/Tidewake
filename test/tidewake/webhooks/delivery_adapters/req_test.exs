@@ -3,6 +3,8 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.ReqTest do
 
   alias Tidewake.Webhooks.DeliveryAdapters.Req, as: ReqAdapter
 
+  @max_response_bytes 65_536
+
   setup context do
     Req.Test.set_req_test_from_context(context)
     Req.Test.verify_on_exit!(context)
@@ -23,7 +25,8 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.ReqTest do
       receive_timeout: 60_000,
       request_timeout: 60_000,
       compressed: true,
-      decode_body: true
+      decode_body: true,
+      into: "configured response body"
     )
 
     on_exit(fn -> restore_options(previous_options) end)
@@ -64,6 +67,76 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.ReqTest do
     refute Map.has_key?(response, :body)
   end
 
+  test "accepts an empty response without returning a body", %{stub: stub} do
+    Req.Test.expect(stub, fn conn -> Plug.Conn.send_resp(conn, 204, "") end)
+
+    assert {:ok, %{status: 204} = response} =
+             ReqAdapter.deliver("https://example.com/webhooks", "{}", [])
+
+    refute Map.has_key?(response, :body)
+  end
+
+  test "accepts a response at the exact byte limit", %{stub: stub} do
+    body = String.duplicate("a", @max_response_bytes)
+
+    Req.Test.expect(stub, fn conn -> send_chunked_response(conn, 200, [body]) end)
+
+    assert {:ok, %{status: 200} = response} =
+             ReqAdapter.deliver("https://example.com/webhooks", "{}", [])
+
+    refute Map.has_key?(response, :body)
+  end
+
+  test "rejects a response one byte above the limit and makes one request", %{stub: stub} do
+    body = String.duplicate("a", @max_response_bytes + 1)
+
+    Req.Test.expect(stub, 1, fn conn -> send_chunked_response(conn, 200, [body]) end)
+
+    assert ReqAdapter.deliver("https://example.com/webhooks", "{}", []) ==
+             {:error, :response_too_large}
+  end
+
+  test "discards a chunked response without a content-length header", %{stub: stub} do
+    Req.Test.expect(stub, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("x-response-kind", "chunked")
+      |> send_chunked_response(206, ["first", "-", "second"])
+    end)
+
+    assert {:ok, %{status: 206, headers: headers} = response} =
+             ReqAdapter.deliver("https://example.com/webhooks", "{}", [])
+
+    assert {"x-response-kind", "chunked"} in headers
+    refute Enum.any?(headers, &match?({"content-length", _value}, &1))
+    refute Map.has_key?(response, :body)
+  end
+
+  test "does not trust content-length smaller than the response", %{stub: stub} do
+    body = String.duplicate("a", @max_response_bytes + 1)
+
+    Req.Test.expect(stub, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("content-length", "1")
+      |> send_chunked_response(200, [body])
+    end)
+
+    assert ReqAdapter.deliver("https://example.com/webhooks", "{}", []) ==
+             {:error, :response_too_large}
+  end
+
+  test "does not trust content-length larger than the response", %{stub: stub} do
+    Req.Test.expect(stub, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("content-length", Integer.to_string(@max_response_bytes + 1))
+      |> send_chunked_response(202, ["accepted"])
+    end)
+
+    assert {:ok, %{status: 202} = response} =
+             ReqAdapter.deliver("https://example.com/webhooks", "{}", [])
+
+    refute Map.has_key?(response, :body)
+  end
+
   test "returns a 503 as an HTTP response without retrying", %{stub: stub} do
     Req.Test.expect(stub, fn conn ->
       conn
@@ -95,6 +168,15 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.ReqTest do
 
     assert ReqAdapter.deliver("https://example.com/webhooks", "{}", []) ==
              {:error, :timeout}
+  end
+
+  defp send_chunked_response(conn, status, chunks) do
+    conn = Plug.Conn.send_chunked(conn, status)
+
+    Enum.reduce(chunks, conn, fn chunk, conn ->
+      {:ok, conn} = Plug.Conn.chunk(conn, chunk)
+      conn
+    end)
   end
 
   defp restore_options({:ok, options}), do: Application.put_env(:tidewake, ReqAdapter, options)
