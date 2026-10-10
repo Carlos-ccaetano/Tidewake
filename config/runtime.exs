@@ -24,6 +24,32 @@ config :tidewake, TidewakeWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :dev do
+  read_boolean = fn name ->
+    case System.get_env(name, "false") do
+      "true" -> true
+      "false" -> false
+      _value -> raise "environment variable #{name} must be true or false"
+    end
+  end
+
+  outbound_http? = read_boolean.("TIDEWAKE_ENABLE_OUTBOUND_HTTP")
+  local_targets? = read_boolean.("TIDEWAKE_ALLOW_LOCAL_WEBHOOK_TARGETS")
+
+  delivery_adapter =
+    if outbound_http? do
+      Tidewake.Webhooks.DeliveryAdapters.Req
+    else
+      Tidewake.Webhooks.DeliveryAdapters.Deterministic
+    end
+
+  target_mode = if local_targets?, do: :local, else: :public
+
+  config :tidewake, :delivery_adapter, delivery_adapter
+
+  config :tidewake, Tidewake.Webhooks.DeliveryAdapters.Req,
+    resolver: Tidewake.Webhooks.OutboundResolvers.System,
+    target_mode: target_mode
+
   # Reload browser tabs when matching files change.
   config :tidewake, TidewakeWeb.Endpoint,
     live_reload: [
@@ -41,6 +67,12 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
+  config :tidewake, :delivery_adapter, Tidewake.Webhooks.DeliveryAdapters.Req
+
+  config :tidewake, Tidewake.Webhooks.DeliveryAdapters.Req,
+    resolver: Tidewake.Webhooks.OutboundResolvers.System,
+    target_mode: :public
+
   api_token =
     System.get_env("TIDEWAKE_API_TOKEN") ||
       raise "environment variable TIDEWAKE_API_TOKEN is missing"

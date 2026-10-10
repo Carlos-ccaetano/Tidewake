@@ -14,6 +14,12 @@ config :tidewake,
          "dev-only-webhook-signing-secret-not-for-production"
        )
 
+config :tidewake, :delivery_adapter, Tidewake.Webhooks.DeliveryAdapters.Deterministic
+
+config :tidewake, Tidewake.Webhooks.DeliveryAdapters.Req,
+  resolver: Tidewake.Webhooks.OutboundResolvers.System,
+  target_mode: :public
+
 config :tidewake, Tidewake.Repo,
   username: System.get_env("POSTGRES_USER", "postgres"),
   password: System.get_env("POSTGRES_PASSWORD", "postgres"),

@@ -33,6 +33,10 @@ config :tidewake, Oban, testing: :inline, queues: false, plugins: false
 
 config :tidewake, :delivery_adapter, Tidewake.Webhooks.DeliveryAdapters.Deterministic
 
+config :tidewake, Tidewake.Webhooks.DeliveryAdapters.Req,
+  resolver: Tidewake.Webhooks.OutboundResolvers.System,
+  target_mode: :public
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
