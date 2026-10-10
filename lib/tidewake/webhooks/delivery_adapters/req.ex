@@ -10,15 +10,17 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
   @behaviour Tidewake.Webhooks.DeliveryAdapter
 
   alias Tidewake.Webhooks.DeliveryAdapters.ResponseLimiter
+  alias Tidewake.Webhooks.OutboundResolvers.System
+  alias Tidewake.Webhooks.OutboundTarget
 
   @max_response_bytes 65_536
+  @pool_max_idle_time 60_000
 
   @request_options [
     method: :post,
     retry: false,
     redirect: false,
     http_errors: :return,
-    connect_options: [timeout: 5_000],
     receive_timeout: 10_000,
     request_timeout: 15_000,
     compressed: false,
@@ -27,12 +29,30 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
 
   @impl true
   def deliver(url, body, headers) do
-    options =
-      Application.get_env(:tidewake, __MODULE__, [])
-      |> Keyword.merge(request_options())
-      |> Keyword.merge(url: url, body: body, headers: headers)
+    config = Application.get_env(:tidewake, __MODULE__, [])
+    resolver = Keyword.get(config, :resolver, System)
+    target_mode = Keyword.get(config, :target_mode, :public)
 
-    case Elixir.Req.request(options) do
+    with {:ok, target} <- OutboundTarget.prepare(url, resolver, target_mode) do
+      config
+      |> Keyword.drop([
+        :resolver,
+        :target_mode,
+        :connect_options,
+        :finch,
+        :inet6,
+        :pool_max_idle_time,
+        :unix_socket
+      ])
+      |> Keyword.merge(request_options(target.hostname))
+      |> Keyword.merge(url: target.connection_url, body: body, headers: headers)
+      |> Elixir.Req.request()
+      |> normalize_result()
+    end
+  end
+
+  defp normalize_result(result) do
+    case result do
       {:ok, %Elixir.Req.Response{} = response} ->
         normalize_response(response)
 
@@ -47,8 +67,17 @@ defmodule Tidewake.Webhooks.DeliveryAdapters.Req do
     end
   end
 
-  defp request_options do
-    Keyword.put(@request_options, :into, ResponseLimiter.into(@max_response_bytes))
+  defp request_options(hostname) do
+    @request_options
+    |> Keyword.put(:finch,
+      pool_max_idle_time: @pool_max_idle_time,
+      protocols: [:http1],
+      conn_opts: [
+        hostname: hostname,
+        transport_opts: [timeout: 5_000]
+      ]
+    )
+    |> Keyword.put(:into, ResponseLimiter.into(@max_response_bytes))
   end
 
   defp normalize_response(response) do
