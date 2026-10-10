@@ -6,7 +6,7 @@ Endpoint persistence and the endpoint management HTTP API are implemented. The `
 
 Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint. For an active endpoint, the processor signs the exact serialized envelope before passing it to the configured adapter. If the endpoint is inactive when the delivery is claimed, Tidewake cancels the delivery without invoking the adapter or creating an attempt. A periodic worker returns stale deliveries left in `processing` to `pending` for another execution.
 
-The configured adapter remains deterministic and local. A Req-based adapter is implemented, but it is not active, so Tidewake does not perform external HTTP webhook delivery in production. Persisted outcomes and bounded Telemetry cover the current local processing, cancellation, and recovery paths. Every route under `/api`, including endpoint management, requires the configured static API token.
+Production uses the Req adapter with the system resolver and public-only destination policy. Development remains deterministic unless outbound HTTP is explicitly enabled; private-use and loopback destinations require a second development-only opt-in, and all other special-purpose ranges remain blocked. Each delivery attempt validates the URL again, resolves IPv4 and IPv6 hostnames, rejects mixed safe and unsafe answers, and connects to one approved IP while preserving the original hostname for Host, SNI, and TLS verification. Redirects and internal retries are disabled, idle dynamic pools expire after 60 seconds, and response bodies are streamed, limited to 65,536 bytes, and discarded. Persisted transport failures contain only bounded classifications. Every route under `/api`, including endpoint management, requires the configured static API token.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -262,11 +262,9 @@ The following capabilities remain outside the current implementation:
 
 - users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token;
 - project ownership for endpoints and events;
-- production activation and configuration of external HTTP webhook delivery through the Req adapter;
-- SSRF protection for outbound destinations;
-- enforcement of a real response-body byte limit;
 - retry and backoff policies;
 - pagination;
 - advanced filtering;
 - endpoint health checks;
+- rate limiting and an operational interface;
 - production deployment.
