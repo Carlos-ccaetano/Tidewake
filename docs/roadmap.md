@@ -41,7 +41,7 @@ Implemented:
 - the `pending → processing → succeeded/failed` transitions and terminal `pending → cancelled` transition, with atomic claim and finalization;
 - delivery-time endpoint re-evaluation that cancels a pending delivery for an inactive endpoint without an adapter call or attempt;
 - tests for transactional scheduling, rollback, and complete success and persisted-failure cycles through the worker;
-- a Req-backed adapter with explicit timeouts, redirects and internal retries disabled, implemented and tested in isolation without activation;
+- a Req-backed adapter with explicit timeouts, redirects and internal retries disabled;
 - transactional fan-out to active endpoints in increasing ID order, creating one delivery and one initial job per destination;
 - periodic recovery, every minute, of deliveries left in `processing` for at least five minutes;
 - a deterministic oldest-first recovery batch limited to 100 delivery IDs, processed serially on a dedicated maintenance queue;
@@ -50,7 +50,7 @@ Implemented:
 - bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, controlled processing errors, and recovery batches;
 - declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, controlled error reasons and duration, and recovered, skipped, and controlled-error recovery counts plus batch duration.
 
-This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Completion does not enable real external delivery: complete SSRF protection, a hard response-byte limit, activation of the Req adapter, and project ownership remain in Milestone 2; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production readiness remains in Milestone 5.
+This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Safe external delivery and project ownership belong to Milestone 2; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production deployment remains in Milestone 5.
 
 ## Milestone 2: endpoints and outbound delivery
 
@@ -62,16 +62,24 @@ Completed:
 - HTTP management API for endpoint creation, listing, retrieval, and updates, including deactivation with `active: false`.
 - production-validated configuration for the webhook signing secret, with explicit local and test values;
 - versioned HMAC-SHA256 headers generated from the event's public ID, attempt timestamp, exact body bytes, and configured secret;
-- single-pass envelope serialization and preparation of `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` before the deterministic adapter is invoked, without persisting the secret, signature, or timestamp.
+- single-pass envelope serialization and preparation of `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` before the adapter is invoked, without persisting the secret, signature, or timestamp;
+- application-level endpoint URL limits of 2,048 bytes;
+- per-attempt URL validation, IPv4 and IPv6 resolution, IANA special-range classification, and rejection of any DNS answer set containing a disallowed address;
+- IP-literal classification and connection pinning to one approved address while preserving the original hostname for Host, SNI, and TLS verification;
+- redirects and Req retries disabled, with idle dynamic pools expiring after 60 seconds;
+- streamed response consumption limited to 65,536 bytes, with response bodies discarded;
+- bounded `destination`, `dns`, and `response_limit` persistence classifications without raw destination or transport details;
+- the Req adapter enabled in production with the system resolver and public-only targets;
+- deterministic development by default, with separate explicit development flags for outbound HTTP and local targets;
+- a complete worker-path test using Req.Test and an independently recalculated HMAC without external network access.
 
-Tests continue to configure the deterministic adapter as the current default. The Req adapter exists and is tested, but it is not activated as the delivery transport, so production does not send webhooks over the network. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
+Tests remain deterministic and do not access the network. Production uses the guarded Req transport. Signature verification, timestamp validation, replay protection, used-signature storage, and secret rotation are responsibilities of the receiver and remain outside Tidewake.
 
 Planned:
 
 - associate endpoints with projects;
-- implement complete destination protection against SSRF and a hard bound on response bytes actually received;
-- activate the Req adapter only after those safeguards exist;
-- test the safeguards required for activated external transport.
+- add project-scoped authorization;
+- add endpoint health checks and rate limiting.
 
 ## Milestone 3: retry and idempotency hardening
 

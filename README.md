@@ -2,13 +2,13 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` does not mean a webhook was sent or delivered. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record local delivery outcomes, periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, cancellation, and recovery, and declarative domain metrics are available.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` acknowledges durable ingestion, not completed delivery. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record delivery outcomes, periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, cancellation, and recovery, and declarative domain metrics are available.
 
 Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
 
 For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once, and signs those exact bytes. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
 
-Tests continue to configure the deterministic adapter as the current default; it simulates a 204 response without I/O. The Req adapter is implemented and tested, but remains inactive pending complete SSRF protection and a hard limit on response bytes consumed, so production does not send webhooks over the network. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, activation of the Req transport, retries and backoff, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
+Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, delivery retries and backoff, receiver-side replay protection and secret rotation, rate limiting, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending.
 
 ## Relationship with Ironhold
 
@@ -22,9 +22,8 @@ This repository does not contain or modify Ironhold.
 
     Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
 
-Tidewake currently accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. This durable fan-out is not proof of an outbound HTTP delivery. The broader architecture will eventually:
+Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. Production workers can deliver signed requests through the guarded Req transport. The broader architecture will eventually:
 
-- activate outbound HTTP requests with Req after its destination and response-size safeguards are complete;
 - retry transient failures with exponential backoff;
 - enforce idempotency at the delivery boundary;
 - expose operational history through Phoenix LiveView;
@@ -108,6 +107,45 @@ The endpoint API supports `POST /api/endpoints`, `GET /api/endpoints`, `GET /api
 
 The event API supports `POST /api/events`, `GET /api/events/:id`, and `GET /api/events/:id/deliveries`. Event listing, updates, deletion, and attempt detail are not implemented.
 
+## Local Tidewake to Ironhold delivery
+
+Use the same public, local-only signing value in both applications. Neither project loads `.env` automatically, so export the variables in the shell that starts each server.
+
+In the Ironhold repository, start the receiver on port 4001:
+
+    export IRONHOLD_WEBHOOK_SIGNING_SECRET=dev-only-webhook-signing-secret-not-for-production
+    PORT=4001 mix phx.server
+
+In this repository, explicitly enable outbound HTTP and local targets for development:
+
+    export TIDEWAKE_WEBHOOK_SIGNING_SECRET=dev-only-webhook-signing-secret-not-for-production
+    export TIDEWAKE_ENABLE_OUTBOUND_HTTP=true
+    export TIDEWAKE_ALLOW_LOCAL_WEBHOOK_TARGETS=true
+    mix phx.server
+
+Register Ironhold as an active endpoint:
+
+    curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
+      -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+      -H 'content-type: application/json' \
+      -d '{"name":"Local Ironhold","url":"http://127.0.0.1:4001/api/webhooks"}'
+
+Send an event with a unique external ID:
+
+    EVENT_EXTERNAL_ID="evt_local_$(date +%s)"
+    curl --fail-with-body -X POST http://localhost:4000/api/events \
+      -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+      -H 'content-type: application/json' \
+      -d "{\"external_id\":\"${EVENT_EXTERNAL_ID}\",\"type\":\"order.created\",\"data\":{\"order_id\":\"local-123\"}}"
+
+Read the internal event `id` from that response and check its delivery:
+
+    curl --fail-with-body \
+      -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+      http://localhost:4000/api/events/<event-id>/deliveries
+
+The delivery should reach `succeeded` with `attempt_count` equal to 1. The Ironhold terminal should show `POST /api/webhooks` completing with `202`, confirming that the authenticated webhook reached the receiver.
+
 Stop the database when finished:
 
     docker compose down
@@ -122,6 +160,8 @@ Local configuration supports:
 | --- | --- | --- |
 | TIDEWAKE_API_TOKEN | dev-only-api-token-not-for-production | Static Bearer token for `/api`; this public local value is not for production. |
 | TIDEWAKE_WEBHOOK_SIGNING_SECRET | dev-only-webhook-signing-secret-not-for-production | Secret used to prepare webhook signing headers; this public local value is not for production. |
+| TIDEWAKE_ENABLE_OUTBOUND_HTTP | false | Enables the Req delivery adapter only in development when set to `true`. |
+| TIDEWAKE_ALLOW_LOCAL_WEBHOOK_TARGETS | false | Allows private-use and loopback targets only in development when set to `true`. |
 | POSTGRES_USER | postgres | PostgreSQL user |
 | POSTGRES_PASSWORD | postgres | Local-only PostgreSQL password |
 | POSTGRES_DB | tidewake_dev | Development database |
@@ -158,13 +198,13 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint, event, delivery, attempt, transactional fan-out, stale-delivery recovery, envelope encoding, and signature generation live in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, transactional fan-out, stale-delivery recovery, envelope encoding, signature generation, safe target preparation, and bounded response consumption live in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Outbound HTTP delivery, retries, and idempotency hardening.
+3. Outbound HTTP delivery is active in production; retries and idempotency hardening remain pending.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 
