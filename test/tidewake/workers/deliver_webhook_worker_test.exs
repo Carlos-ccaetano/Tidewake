@@ -6,15 +6,41 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
   alias Tidewake.Webhooks
   alias Tidewake.Workers.DeliverWebhookWorker
 
-  test "builds a default queue job with only the delivery ID and one attempt" do
+  test "builds the first attempt on the default queue with one Oban attempt" do
     changeset = DeliverWebhookWorker.new_for_delivery(1)
 
     assert changeset.valid?
     job = apply_changes(changeset)
-    assert job.args == %{"delivery_id" => 1}
+    assert job.args == %{"delivery_id" => 1, "attempt_number" => 1}
     assert job.queue == "default"
     assert job.max_attempts == 1
     assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
+    assert job.unique.keys == [:delivery_id, :attempt_number]
+  end
+
+  test "builds an immediate job for an explicit logical attempt" do
+    changeset = DeliverWebhookWorker.new_for_delivery(1, 2)
+
+    assert changeset.valid?
+    job = apply_changes(changeset)
+    assert job.args == %{"delivery_id" => 1, "attempt_number" => 2}
+    assert job.queue == "default"
+    assert job.max_attempts == 1
+  end
+
+  test "builds a scheduled job for an explicit logical attempt" do
+    scheduled_at = ~U[2099-01-15 12:00:00.123456Z]
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, job} =
+               DeliverWebhookWorker.new_scheduled_for_delivery(1, 3, scheduled_at)
+               |> Oban.insert()
+
+      assert job.args == %{"delivery_id" => 1, "attempt_number" => 3}
+      assert job.scheduled_at == scheduled_at
+      assert job.state == "scheduled"
+      assert job.max_attempts == 1
+    end)
   end
 
   test "rejects invalid delivery IDs" do
@@ -25,21 +51,58 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     end
   end
 
+  test "rejects invalid logical attempts and scheduled times" do
+    for attempt_number <- [0, -1, "1", 1.0, nil] do
+      assert_raise FunctionClauseError, fn ->
+        DeliverWebhookWorker.new_for_delivery(1, attempt_number)
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        DeliverWebhookWorker.new_scheduled_for_delivery(
+          1,
+          attempt_number,
+          ~U[2099-01-15 12:00:00.123456Z]
+        )
+      end
+    end
+
+    non_utc = %{~U[2099-01-15 12:00:00.123456Z] | utc_offset: 3_600}
+
+    assert_raise FunctionClauseError, fn ->
+      DeliverWebhookWorker.new_scheduled_for_delivery(1, 1, non_utc)
+    end
+  end
+
   test "active equivalent jobs conflict" do
     Oban.Testing.with_testing_mode(:manual, fn ->
       assert {:ok, first} =
-               1
-               |> DeliverWebhookWorker.new_for_delivery()
+               DeliverWebhookWorker.new_for_delivery(1, 2)
                |> Oban.insert()
 
       assert {:ok, conflicting} =
-               1
-               |> DeliverWebhookWorker.new_for_delivery()
+               DeliverWebhookWorker.new_for_delivery(1, 2)
                |> Oban.insert()
 
       assert conflicting.conflict?
       assert conflicting.id == first.id
       assert Repo.aggregate(Oban.Job, :count) == 1
+    end)
+  end
+
+  test "different logical attempts for the same delivery coexist" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first} =
+               DeliverWebhookWorker.new_for_delivery(1, 1)
+               |> Oban.insert()
+
+      assert {:ok, second} =
+               DeliverWebhookWorker.new_for_delivery(1, 2)
+               |> Oban.insert()
+
+      refute first.conflict?
+      refute second.conflict?
+      refute second.id == first.id
+      assert Repo.aggregate(Oban.Job, :count) == 2
     end)
   end
 
@@ -76,7 +139,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert job.state == "completed"
       assert job.attempt == 1
       assert job.max_attempts == 1
-      assert job.args == %{"delivery_id" => delivery.id}
+      assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
     end)
 
     finalized = Webhooks.get_delivery(delivery.id)
@@ -85,6 +148,18 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert [attempt] = Webhooks.list_attempts(delivery)
     assert attempt.result == "succeeded"
     assert attempt.http_status == 204
+    assert attempt.attempt_number == 1
+  end
+
+  test "executes a legacy one-key job as the first attempt" do
+    delivery = delivery_fixture()
+
+    assert :ok = perform_job(DeliverWebhookWorker, %{delivery_id: delivery.id})
+
+    finalized = Webhooks.get_delivery(delivery.id)
+    assert finalized.status == "succeeded"
+    assert finalized.attempt_count == 1
+    assert [attempt] = Webhooks.list_attempts(delivery)
     assert attempt.attempt_number == 1
   end
 
@@ -128,7 +203,10 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
   test "cancels a missing delivery without retrying" do
     assert {:cancel, :not_found} =
-             perform_job(DeliverWebhookWorker, %{delivery_id: 2_147_483_647})
+             perform_job(DeliverWebhookWorker, %{
+               delivery_id: 2_147_483_647,
+               attempt_number: 1
+             })
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
@@ -146,7 +224,10 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
 
     assert {:error, :invalid_transition} =
-             perform_job(DeliverWebhookWorker, %{delivery_id: delivery.id})
+             perform_job(DeliverWebhookWorker, %{
+               delivery_id: delivery.id,
+               attempt_number: 1
+             })
 
     Oban.Testing.with_testing_mode(:inline, fn ->
       assert {:ok, job} =
@@ -214,7 +295,17 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
   end
 
   test "rejects invalid or additional job arguments" do
-    for args <- [%{}, %{delivery_id: 0}, %{delivery_id: "1"}, %{delivery_id: 1, body: "secret"}] do
+    for args <- [
+          %{},
+          %{attempt_number: 1},
+          %{delivery_id: 0},
+          %{delivery_id: "1"},
+          %{delivery_id: 1, attempt_number: 0},
+          %{delivery_id: 1, attempt_number: -1},
+          %{delivery_id: 1, attempt_number: "1"},
+          %{delivery_id: 1, body: "secret"},
+          %{delivery_id: 1, attempt_number: 1, body: "secret"}
+        ] do
       assert {:cancel, :invalid_args} = perform_job(DeliverWebhookWorker, args)
     end
   end

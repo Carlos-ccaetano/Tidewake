@@ -74,11 +74,16 @@ defmodule Tidewake.WebhooksTest do
         assert delivery.endpoint_id == endpoint.id
         assert delivery.status == "pending"
         assert delivery.attempt_count == 0
-        assert job.args == %{"delivery_id" => delivery.id}
+        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.max_attempts == 1
         assert job.state == "available"
-        assert Repo.get(Oban.Job, job.id).args == %{"delivery_id" => delivery.id}
+
+        assert Repo.get(Oban.Job, job.id).args == %{
+                 "delivery_id" => delivery.id,
+                 "attempt_number" => 1
+               }
+
         assert Webhooks.get_delivery(delivery.id) == delivery
       end)
     end
@@ -104,7 +109,7 @@ defmodule Tidewake.WebhooksTest do
                end)
 
         assert Enum.map(jobs, & &1.args) ==
-                 Enum.map(deliveries, &%{"delivery_id" => &1.id})
+                 Enum.map(deliveries, &%{"delivery_id" => &1.id, "attempt_number" => 1})
 
         assert length(deliveries) == 3
         assert length(jobs) == 3
@@ -210,14 +215,14 @@ defmodule Tidewake.WebhooksTest do
 
         assert delivery.status == "pending"
         assert delivery.attempt_count == 0
-        assert job.args == %{"delivery_id" => delivery.id}
+        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.queue == "default"
         assert job.max_attempts == 1
         assert job.state == "available"
         assert Repo.get(Oban.Job, job.id).args == job.args
         assert Webhooks.get_delivery(delivery.id) == delivery
-        assert job.unique.keys == [:delivery_id]
+        assert job.unique.keys == [:delivery_id, :attempt_number]
         assert job.unique.period == :infinity
       end)
     end
@@ -463,11 +468,16 @@ defmodule Tidewake.WebhooksTest do
         assert recovered.attempt_count == processing.attempt_count
         assert recovered.completed_at == nil
         assert recovered.next_attempt_at == nil
-        assert job.args == %{"delivery_id" => processing.id}
+        assert job.args == %{"delivery_id" => processing.id, "attempt_number" => 4}
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.state == "available"
         refute job.conflict?
-        assert Repo.get!(Oban.Job, job.id).args == %{"delivery_id" => processing.id}
+
+        assert Repo.get!(Oban.Job, job.id).args == %{
+                 "delivery_id" => processing.id,
+                 "attempt_number" => 4
+               }
+
         assert Repo.aggregate(Oban.Job, :count) == 1
         assert Webhooks.list_attempts(recovered) == []
         assert Repo.aggregate(Tidewake.Webhooks.Attempt, :count) == 0
@@ -484,7 +494,7 @@ defmodule Tidewake.WebhooksTest do
                  Webhooks.recover_stale_delivery(processing.id, stale_before)
 
         assert recovered.status == "pending"
-        assert job.args == %{"delivery_id" => processing.id}
+        assert job.args == %{"delivery_id" => processing.id, "attempt_number" => 1}
       end)
     end
 
@@ -545,8 +555,10 @@ defmodule Tidewake.WebhooksTest do
           })
 
         assert {:ok, active_job} =
-                 processing.id
-                 |> DeliverWebhookWorker.new_for_delivery()
+                 DeliverWebhookWorker.new_for_delivery(
+                   processing.id,
+                   processing.attempt_count + 1
+                 )
                  |> Oban.insert()
 
         assert {:error, :active_job} =
