@@ -853,6 +853,171 @@ defmodule Tidewake.WebhooksTest do
     end
   end
 
+  describe "schedule_delivery_retry/3" do
+    test "persists the failed attempt, pending delivery, and future job atomically" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_schedule_retry")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+        retry_at = ~U[2099-01-15 12:00:00.248457Z]
+
+        attrs =
+          valid_attempt_attrs()
+          |> Map.merge(%{
+            result: "http_error",
+            http_status: 503,
+            attempt_number: 999,
+            next_attempt_at: ~U[2098-01-15 12:00:00.000000Z]
+          })
+          |> Map.put("attempt_number", 998)
+          |> Map.put("next_attempt_at", ~U[2097-01-15 12:00:00.000000Z])
+
+        assert {:ok, %{delivery: pending, attempt: attempt, job: job}} =
+                 Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
+
+        assert attempt.delivery_id == processing.id
+        assert attempt.attempt_number == 1
+        assert attempt.result == "http_error"
+        assert attempt.http_status == 503
+        assert attempt.next_attempt_at == retry_at
+
+        assert pending.status == "pending"
+        assert pending.attempt_count == 1
+        assert pending.next_attempt_at == retry_at
+        assert pending.completed_at == nil
+
+        assert job.args == %{"delivery_id" => pending.id, "attempt_number" => 2}
+        assert job.scheduled_at == retry_at
+        assert job.state == "scheduled"
+        assert job.max_attempts == 1
+        refute job.conflict?
+
+        assert Webhooks.get_delivery(pending.id) == pending
+        assert Webhooks.list_attempts(pending) == [attempt]
+        assert Repo.get!(Oban.Job, job.id).scheduled_at == retry_at
+        assert Repo.aggregate(Oban.Job, :count) == 1
+      end)
+    end
+
+    test "an invalid attempt rolls back every retry effect" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_invalid_retry_attempt")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+        before_retry = Webhooks.get_delivery(processing.id)
+
+        attrs =
+          valid_attempt_attrs()
+          |> Map.merge(%{result: "http_error", http_status: 503, duration_ms: -1})
+
+        assert {:error, %Changeset{} = changeset} =
+                 Webhooks.schedule_delivery_retry(
+                   processing.id,
+                   attrs,
+                   ~U[2099-01-15 12:00:00.248457Z]
+                 )
+
+        refute changeset.valid?
+        assert "must be greater than or equal to 0" in errors_on(changeset).duration_ms
+        assert Webhooks.get_delivery(processing.id) == before_retry
+        assert Webhooks.list_attempts(processing) == []
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "a retry time at or before completion rolls back every retry effect" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_invalid_retry_time")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+        before_retry = Webhooks.get_delivery(processing.id)
+        completed_at = ~U[2026-09-10 12:00:00.248456Z]
+
+        attrs =
+          valid_attempt_attrs()
+          |> Map.merge(%{result: "http_error", http_status: 503, completed_at: completed_at})
+
+        for retry_at <- [completed_at, DateTime.add(completed_at, -1, :microsecond)] do
+          assert {:error, %Changeset{} = changeset} =
+                   Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
+
+          refute changeset.valid?
+          assert "must be later than completed_at" in errors_on(changeset).next_attempt_at
+          assert Webhooks.get_delivery(processing.id) == before_retry
+          assert Webhooks.list_attempts(processing) == []
+          assert Repo.aggregate(Oban.Job, :count) == 0
+        end
+      end)
+    end
+
+    test "an equivalent active job rolls back the attempt and delivery update" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_retry_job_conflict")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+        before_retry = Webhooks.get_delivery(processing.id)
+        retry_at = ~U[2099-01-15 12:00:00.248457Z]
+
+        assert {:ok, active_job} =
+                 DeliverWebhookWorker.new_scheduled_for_delivery(processing.id, 2, retry_at)
+                 |> Oban.insert()
+
+        attrs =
+          valid_attempt_attrs()
+          |> Map.merge(%{result: "http_error", http_status: 503})
+
+        assert {:error, :active_job} =
+                 Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
+
+        assert Webhooks.get_delivery(processing.id) == before_retry
+        assert Webhooks.list_attempts(processing) == []
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
+      end)
+    end
+
+    test "rejects every delivery state other than processing without partial state" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        for status <- ~w(pending succeeded failed cancelled) do
+          delivery = delivery_fixture("evt_retry_status_#{status}")
+
+          current =
+            put_delivery_state(delivery, status, ~U[2026-10-16 12:00:00.000000Z], %{
+              completed_at:
+                if(status == "pending", do: nil, else: ~U[2026-10-16 12:00:00.000000Z])
+            })
+
+          assert {:error, :invalid_transition} =
+                   Webhooks.schedule_delivery_retry(
+                     current.id,
+                     Map.merge(valid_attempt_attrs(), %{result: "http_error", http_status: 503}),
+                     ~U[2099-01-15 12:00:00.248457Z]
+                   )
+
+          assert Webhooks.get_delivery(current.id) == current
+          assert Webhooks.list_attempts(current) == []
+        end
+
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end)
+    end
+
+    test "validates public arguments without creating retry state" do
+      retry_at = ~U[2099-01-15 12:00:00.248457Z]
+      non_utc = %{retry_at | utc_offset: 3_600}
+
+      for {delivery_id, attrs, scheduled_at} <- [
+            {0, valid_attempt_attrs(), retry_at},
+            {-1, valid_attempt_attrs(), retry_at},
+            {"1", valid_attempt_attrs(), retry_at},
+            {1, nil, retry_at},
+            {1, valid_attempt_attrs(), nil},
+            {1, valid_attempt_attrs(), non_utc}
+          ] do
+        assert {:error, :invalid_arguments} =
+                 Webhooks.schedule_delivery_retry(delivery_id, attrs, scheduled_at)
+      end
+
+      assert Repo.aggregate(Tidewake.Webhooks.Attempt, :count) == 0
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+  end
+
   describe "finalize_delivery/2" do
     test "persists a successful attempt and finalizes together" do
       delivery = delivery_fixture()

@@ -180,6 +180,31 @@ defmodule Tidewake.Webhooks do
     end)
   end
 
+  def schedule_delivery_retry(
+        delivery_id,
+        attempt_attrs,
+        %DateTime{utc_offset: 0, std_offset: 0} = retry_at
+      )
+      when is_integer(delivery_id) and delivery_id > 0 and is_map(attempt_attrs) do
+    Repo.transaction(fn ->
+      query = from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
+
+      case Repo.one(query) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delivery{status: "processing"} = delivery ->
+          schedule_processing_delivery_retry(delivery, attempt_attrs, retry_at)
+
+        %Delivery{} ->
+          Repo.rollback(:invalid_transition)
+      end
+    end)
+  end
+
+  def schedule_delivery_retry(_delivery_id, _attempt_attrs, _retry_at),
+    do: {:error, :invalid_arguments}
+
   def create_attempt(%Delivery{} = delivery, attrs) do
     %Attempt{delivery_id: delivery.id}
     |> Attempt.changeset(attrs)
@@ -349,6 +374,51 @@ defmodule Tidewake.Webhooks do
       %{delivery: finalized, attempt: attempt}
     else
       {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp schedule_processing_delivery_retry(delivery, attrs, retry_at) do
+    attempt_number = delivery.attempt_count + 1
+
+    attempt_changeset =
+      %Attempt{
+        delivery_id: delivery.id,
+        attempt_number: attempt_number,
+        next_attempt_at: retry_at
+      }
+      |> Attempt.changeset(
+        Map.drop(attrs, [
+          :attempt_number,
+          "attempt_number",
+          :next_attempt_at,
+          "next_attempt_at"
+        ])
+      )
+
+    with {:ok, attempt} <- Repo.insert(attempt_changeset),
+         {:ok, pending} <-
+           delivery
+           |> Delivery.changeset(%{
+             status: "pending",
+             attempt_count: attempt_number,
+             next_attempt_at: retry_at,
+             completed_at: nil
+           })
+           |> Repo.update(),
+         {:ok, job} <-
+           DeliverWebhookWorker.new_scheduled_for_delivery(
+             pending.id,
+             pending.attempt_count + 1,
+             retry_at
+           )
+           |> Oban.insert() do
+      if job.conflict? do
+        Repo.rollback(:active_job)
+      else
+        %{delivery: pending, attempt: attempt, job: job}
+      end
+    else
+      {:error, reason} -> Repo.rollback(reason)
     end
   end
 
