@@ -10,8 +10,21 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
   @impl true
   def deliver(url, body, headers) do
-    send(self(), {:delivered, url, body, headers})
-    Process.get(:worker_adapter_response, {:ok, %{status: 204, headers: []}})
+    case Process.get(:worker_adapter_responses) do
+      [response | remaining] ->
+        call_number = Process.get(:worker_adapter_call_count, 0) + 1
+        Process.put(:worker_adapter_call_count, call_number)
+        Process.put(:worker_adapter_responses, remaining)
+        send(self(), {:lifecycle_adapter_called, call_number})
+        response
+
+      [] ->
+        raise "controlled adapter response queue exhausted"
+
+      nil ->
+        send(self(), {:delivered, url, body, headers})
+        Process.get(:worker_adapter_response, {:ok, %{status: 204, headers: []}})
+    end
   end
 
   test "builds the first attempt on the default queue with one Oban attempt" do
@@ -384,6 +397,175 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert Tidewake.Repo.aggregate(Oban.Job, :count, :id) == 2
   end
 
+  test "a retryable failure schedules one successor that later succeeds" do
+    configure_delivery_adapter(__MODULE__)
+
+    put_adapter_responses([
+      {:ok, %{status: 503, headers: []}},
+      {:ok, %{status: 202, headers: []}}
+    ])
+
+    delivery = delivery_fixture()
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first_job} =
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+      assert_received {:lifecycle_adapter_called, 1}
+
+      pending = Webhooks.get_delivery(delivery.id)
+      assert pending.status == "pending"
+      assert pending.attempt_count == 1
+      assert pending.completed_at == nil
+
+      assert [first_attempt] = Webhooks.list_attempts(pending)
+      assert first_attempt.attempt_number == 1
+      assert first_attempt.result == "http_error"
+      assert first_attempt.http_status == 503
+      assert first_attempt.next_attempt_at == pending.next_attempt_at
+
+      assert [second_job] = all_enqueued(worker: DeliverWebhookWorker)
+      assert second_job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+      assert second_job.scheduled_at == first_attempt.next_attempt_at
+      assert second_job.state == "scheduled"
+      assert Repo.get!(Oban.Job, first_job.id).state == "completed"
+
+      original_retry_at = first_attempt.next_attempt_at
+      make_retry_due(pending, second_job)
+
+      assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+      assert_received {:lifecycle_adapter_called, 2}
+      refute_received {:lifecycle_adapter_called, _}
+
+      succeeded = Webhooks.get_delivery(delivery.id)
+      assert succeeded.status == "succeeded"
+      assert succeeded.attempt_count == 2
+      assert succeeded.next_attempt_at == nil
+      assert succeeded.completed_at != nil
+
+      assert [persisted_first, second_attempt] = Webhooks.list_attempts(succeeded)
+      assert persisted_first.attempt_number == 1
+      assert persisted_first.next_attempt_at == original_retry_at
+      assert second_attempt.attempt_number == 2
+      assert second_attempt.result == "succeeded"
+      assert second_attempt.http_status == 202
+      assert second_attempt.next_attempt_at == nil
+      assert all_enqueued(worker: DeliverWebhookWorker) == []
+      assert Repo.aggregate(Oban.Job, :count, :id) == 2
+    end)
+  end
+
+  test "six retryable failures exhaust the delivery without another job" do
+    configure_delivery_adapter(__MODULE__)
+    put_adapter_responses(List.duplicate({:ok, %{status: 503, headers: []}}, 6))
+    delivery = delivery_fixture()
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, _first_job} =
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      Enum.each(1..6, fn attempt_number ->
+        assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+        assert_received {:lifecycle_adapter_called, ^attempt_number}
+
+        persisted = Webhooks.get_delivery(delivery.id)
+        attempts = Webhooks.list_attempts(persisted)
+        assert Enum.map(attempts, & &1.attempt_number) == Enum.to_list(1..attempt_number)
+
+        if attempt_number < 6 do
+          assert persisted.status == "pending"
+          assert persisted.attempt_count == attempt_number
+          assert [successor] = all_enqueued(worker: DeliverWebhookWorker)
+
+          assert successor.args == %{
+                   "delivery_id" => delivery.id,
+                   "attempt_number" => attempt_number + 1
+                 }
+
+          assert successor.scheduled_at == persisted.next_attempt_at
+          make_retry_due(persisted, successor)
+        else
+          assert persisted.status == "failed"
+          assert persisted.attempt_count == 6
+          assert persisted.next_attempt_at == nil
+          assert persisted.completed_at != nil
+          assert all_enqueued(worker: DeliverWebhookWorker) == []
+        end
+      end)
+
+      refute_received {:lifecycle_adapter_called, _}
+      assert Process.get(:worker_adapter_responses) == []
+      assert Repo.aggregate(Oban.Job, :count, :id) == 6
+    end)
+  end
+
+  test "a permanent HTTP failure finishes without scheduling a successor" do
+    configure_delivery_adapter(__MODULE__)
+    put_adapter_responses([{:ok, %{status: 400, headers: []}}])
+    delivery = delivery_fixture()
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, _job} =
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+      assert_received {:lifecycle_adapter_called, 1}
+      refute_received {:lifecycle_adapter_called, _}
+
+      failed = Webhooks.get_delivery(delivery.id)
+      assert failed.status == "failed"
+      assert failed.attempt_count == 1
+      assert failed.next_attempt_at == nil
+
+      assert [attempt] = Webhooks.list_attempts(failed)
+      assert attempt.attempt_number == 1
+      assert attempt.result == "http_error"
+      assert attempt.http_status == 400
+      assert attempt.next_attempt_at == nil
+      assert all_enqueued(worker: DeliverWebhookWorker) == []
+      assert Repo.aggregate(Oban.Job, :count, :id) == 1
+    end)
+  end
+
+  test "a duplicate logical attempt is rejected before calling the adapter" do
+    configure_delivery_adapter(__MODULE__)
+    put_adapter_responses([{:ok, %{status: 503, headers: []}}])
+    delivery = delivery_fixture()
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, _job} =
+               delivery.id
+               |> DeliverWebhookWorker.new_for_delivery()
+               |> Oban.insert()
+
+      assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
+      assert_received {:lifecycle_adapter_called, 1}
+
+      persisted = Webhooks.get_delivery(delivery.id)
+      assert persisted.status == "pending"
+      assert persisted.attempt_count == 1
+      assert [persisted_attempt] = Webhooks.list_attempts(persisted)
+
+      assert {:cancel, :stale_attempt} =
+               perform_job(DeliverWebhookWorker, %{
+                 delivery_id: delivery.id,
+                 attempt_number: 1
+               })
+
+      refute_received {:lifecycle_adapter_called, _}
+      assert Webhooks.get_delivery(delivery.id) == persisted
+      assert Webhooks.list_attempts(persisted) == [persisted_attempt]
+      assert [_successor] = all_enqueued(worker: DeliverWebhookWorker)
+    end)
+  end
+
   test "rejects invalid or additional job arguments" do
     for args <- [
           %{},
@@ -413,6 +595,23 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
           Application.delete_env(:tidewake, :delivery_adapter)
       end
     end)
+  end
+
+  defp put_adapter_responses(responses) do
+    Process.put(:worker_adapter_responses, responses)
+    Process.put(:worker_adapter_call_count, 0)
+  end
+
+  defp make_retry_due(delivery, job) do
+    due_at = DateTime.add(DateTime.utc_now(), -1, :second)
+
+    delivery
+    |> change(next_attempt_at: due_at)
+    |> Repo.update!()
+
+    job
+    |> change(state: "available", scheduled_at: due_at)
+    |> Repo.update!()
   end
 
   defp delivery_fixture(path \\ "/webhooks") do
