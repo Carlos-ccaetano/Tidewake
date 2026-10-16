@@ -372,6 +372,7 @@ defmodule Tidewake.WebhooksTest do
       assert {:ok, claimed_delivery} = Webhooks.claim_delivery(delivery.id)
       assert claimed_delivery.status == "processing"
       assert claimed_delivery.attempt_count == 0
+      assert claimed_delivery.next_attempt_at == nil
       assert claimed_delivery.completed_at == nil
       assert claimed_delivery.event.id == delivery.event_id
       assert claimed_delivery.endpoint.id == delivery.endpoint_id
@@ -380,17 +381,127 @@ defmodule Tidewake.WebhooksTest do
       assert Webhooks.list_attempts(claimed_delivery) == []
     end
 
-    test "claim_delivery/1 cancels a pending delivery when its endpoint became inactive" do
+    test "claim_delivery/2 claims the expected first attempt using server time" do
       delivery = delivery_fixture()
+
+      assert {:ok, claimed_delivery} = Webhooks.claim_delivery(delivery.id, 1)
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 0
+      assert claimed_delivery.next_attempt_at == nil
+    end
+
+    test "claim_delivery/3 claims a retry exactly when it becomes due" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 1,
+          next_attempt_at: scheduled_at
+        })
+
+      assert {:ok, claimed_delivery} =
+               Webhooks.claim_delivery(delivery.id, 2, scheduled_at)
+
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 1
+      assert claimed_delivery.next_attempt_at == nil
+      assert Webhooks.list_attempts(claimed_delivery) == []
+    end
+
+    test "claim_delivery/3 claims an overdue retry" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+      reference_time = DateTime.add(scheduled_at, 1, :second)
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 2,
+          next_attempt_at: scheduled_at
+        })
+
+      assert {:ok, claimed_delivery} =
+               Webhooks.claim_delivery(delivery.id, 3, reference_time)
+
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 2
+      assert claimed_delivery.next_attempt_at == nil
+    end
+
+    test "claim_delivery/3 rejects a retry one microsecond early without mutation" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+      reference_time = DateTime.add(scheduled_at, -1, :microsecond)
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 1,
+          next_attempt_at: scheduled_at
+        })
+
+      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+
+      assert {:error, :not_due} =
+               Webhooks.claim_delivery(delivery.id, 2, reference_time)
+
+      assert_claim_rejected_without_mutation(delivery)
+    end
+
+    test "claim_delivery/1 respects a future next_attempt_at" do
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 1,
+          next_attempt_at: ~U[2099-01-15 12:00:00.123456Z]
+        })
+
+      assert {:error, :not_due} = Webhooks.claim_delivery(delivery.id)
+      assert_claim_rejected_without_mutation(delivery)
+    end
+
+    test "claim_delivery/3 rejects previous and future attempt numbers without mutation" do
+      reference_time = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 2,
+          next_attempt_at: reference_time
+        })
+
+      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+
+      for attempt_number <- [2, 4] do
+        assert {:error, :stale_attempt} =
+                 Webhooks.claim_delivery(delivery.id, attempt_number, reference_time)
+
+        assert_claim_rejected_without_mutation(delivery)
+      end
+    end
+
+    test "claim_delivery/3 cancels a due retry when its endpoint became inactive" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", ~U[2026-10-16 11:59:00.000000Z], %{
+          attempt_count: 2,
+          next_attempt_at: scheduled_at
+        })
+
       endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
       assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
       before_claim = DateTime.utc_now()
 
-      assert {:cancelled, cancelled} = Webhooks.claim_delivery(delivery.id)
+      assert {:cancelled, cancelled} =
+               Webhooks.claim_delivery(delivery.id, 3, scheduled_at)
 
       after_claim = DateTime.utc_now()
       assert cancelled.status == "cancelled"
       assert cancelled.attempt_count == delivery.attempt_count
+      assert cancelled.next_attempt_at == nil
       assert cancelled.completed_at != nil
       assert DateTime.compare(cancelled.completed_at, before_claim) in [:eq, :gt]
       assert DateTime.compare(cancelled.completed_at, after_claim) in [:eq, :lt]
@@ -402,11 +513,12 @@ defmodule Tidewake.WebhooksTest do
       assert Webhooks.get_delivery(delivery.id).status == "cancelled"
       assert Webhooks.list_attempts(cancelled) == []
 
-      assert {:error, :invalid_transition} = Webhooks.claim_delivery(delivery.id)
+      assert {:error, :invalid_transition} =
+               Webhooks.claim_delivery(delivery.id, 3, scheduled_at)
     end
 
     for status <- ~w(processing succeeded failed cancelled) do
-      test "claim_delivery/1 does not cancel a delivery already in #{status}" do
+      test "claim_delivery/3 rejects a delivery already in #{status}" do
         status = unquote(status)
         delivery = delivery_fixture()
         endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
@@ -426,9 +538,17 @@ defmodule Tidewake.WebhooksTest do
           |> Repo.update!()
 
         assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
-        assert {:error, :invalid_transition} = Webhooks.claim_delivery(delivery.id)
+
+        assert {:error, :invalid_transition} =
+                 Webhooks.claim_delivery(
+                   delivery.id,
+                   persisted.attempt_count + 1,
+                   ~U[2026-10-16 12:00:00.123456Z]
+                 )
+
         assert Webhooks.get_delivery(delivery.id) == persisted
         assert Webhooks.list_attempts(delivery) == []
+        assert Repo.aggregate(Oban.Job, :count) == 0
       end
     end
 
@@ -436,15 +556,45 @@ defmodule Tidewake.WebhooksTest do
       assert {:error, :not_found} = Webhooks.claim_delivery(-1)
     end
 
-    test "only one of two independent claims succeeds" do
-      delivery = delivery_fixture()
+    test "validates claim arguments before querying the database" do
+      handler_id = {__MODULE__, :invalid_claim_query, make_ref()}
 
-      first_claim = Webhooks.claim_delivery(delivery.id)
-      second_claim = Webhooks.claim_delivery(delivery.id)
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:tidewake, :repo, :query],
+          fn _event, _measurements, _metadata, test_pid -> send(test_pid, :claim_query) end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      reference_time = ~U[2026-10-16 12:00:00.123456Z]
+      non_utc = %{reference_time | utc_offset: 3_600, time_zone: "Etc/GMT-1"}
+
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery("1")
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 0)
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, "1")
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(0, 1, reference_time)
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 0, reference_time)
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 1, non_utc)
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 1, nil)
+
+      refute_received :claim_query
+    end
+
+    test "only one of two independent guarded claims succeeds" do
+      delivery = delivery_fixture()
+      reference_time = ~U[2026-10-16 12:00:00.123456Z]
+
+      first_claim = Webhooks.claim_delivery(delivery.id, 1, reference_time)
+      second_claim = Webhooks.claim_delivery(delivery.id, 1, reference_time)
 
       assert {:ok, claimed_delivery} = first_claim
       assert claimed_delivery.status == "processing"
       assert {:error, :invalid_transition} = second_claim
+      assert Webhooks.list_attempts(claimed_delivery) == []
+      assert Repo.aggregate(Oban.Job, :count) == 0
     end
   end
 
@@ -1036,6 +1186,12 @@ defmodule Tidewake.WebhooksTest do
     delivery
     |> Changeset.change(attrs)
     |> Repo.update!()
+  end
+
+  defp assert_claim_rejected_without_mutation(delivery) do
+    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.list_attempts(delivery) == []
+    assert Repo.aggregate(Oban.Job, :count) == 0
   end
 
   defp attempt_fixture(delivery, attrs \\ %{}) do

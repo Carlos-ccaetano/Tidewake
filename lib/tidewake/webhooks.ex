@@ -89,16 +89,48 @@ defmodule Tidewake.Webhooks do
     Repo.get_by(Delivery, event_id: event.id, endpoint_id: endpoint.id)
   end
 
-  def claim_delivery(id) do
+  def claim_delivery(delivery_id) when is_integer(delivery_id) do
+    claim_delivery_with_guard(delivery_id, :current_attempt, DateTime.utc_now())
+  end
+
+  def claim_delivery(_delivery_id), do: {:error, :invalid_arguments}
+
+  def claim_delivery(delivery_id, expected_attempt_number)
+      when is_integer(delivery_id) and delivery_id > 0 and is_integer(expected_attempt_number) and
+             expected_attempt_number > 0 do
+    claim_delivery(delivery_id, expected_attempt_number, DateTime.utc_now())
+  end
+
+  def claim_delivery(_delivery_id, _expected_attempt_number),
+    do: {:error, :invalid_arguments}
+
+  def claim_delivery(
+        delivery_id,
+        expected_attempt_number,
+        %DateTime{time_zone: "Etc/UTC", utc_offset: 0, std_offset: 0} = reference_time
+      )
+      when is_integer(delivery_id) and delivery_id > 0 and is_integer(expected_attempt_number) and
+             expected_attempt_number > 0 do
+    claim_delivery_with_guard(delivery_id, expected_attempt_number, reference_time)
+  end
+
+  def claim_delivery(_delivery_id, _expected_attempt_number, _reference_time),
+    do: {:error, :invalid_arguments}
+
+  defp claim_delivery_with_guard(delivery_id, expected_attempt_number, reference_time) do
     Repo.transaction(fn ->
-      query = from(delivery in Delivery, where: delivery.id == ^id, lock: "FOR UPDATE")
+      query =
+        from(delivery in Delivery,
+          where: delivery.id == ^delivery_id,
+          lock: "FOR UPDATE"
+        )
 
       case Repo.one(query) do
         nil ->
           Repo.rollback(:not_found)
 
         %Delivery{status: "pending"} = delivery ->
-          prepare_pending_delivery(delivery)
+          claim_pending_delivery(delivery, expected_attempt_number, reference_time)
 
         %Delivery{} ->
           Repo.rollback(:invalid_transition)
@@ -332,14 +364,43 @@ defmodule Tidewake.Webhooks do
     delivery = %{delivery | endpoint: endpoint, event: event}
 
     if endpoint.active do
-      persist_claim_transition(delivery, %{status: "processing"}, :ok)
+      persist_claim_transition(
+        delivery,
+        %{status: "processing", next_attempt_at: nil},
+        :ok
+      )
     else
       persist_claim_transition(
         delivery,
-        %{status: "cancelled", completed_at: DateTime.utc_now()},
+        %{status: "cancelled", completed_at: DateTime.utc_now(), next_attempt_at: nil},
         :cancelled
       )
     end
+  end
+
+  defp claim_pending_delivery(delivery, expected_attempt_number, reference_time) do
+    with :ok <- validate_expected_attempt(delivery, expected_attempt_number),
+         :ok <- validate_claim_time(delivery, reference_time) do
+      prepare_pending_delivery(delivery)
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp validate_expected_attempt(_delivery, :current_attempt), do: :ok
+
+  defp validate_expected_attempt(delivery, expected_attempt_number) do
+    if expected_attempt_number == delivery.attempt_count + 1,
+      do: :ok,
+      else: {:error, :stale_attempt}
+  end
+
+  defp validate_claim_time(%Delivery{next_attempt_at: nil}, _reference_time), do: :ok
+
+  defp validate_claim_time(%Delivery{next_attempt_at: next_attempt_at}, reference_time) do
+    if DateTime.compare(next_attempt_at, reference_time) == :gt,
+      do: {:error, :not_due},
+      else: :ok
   end
 
   defp persist_claim_transition(delivery, attrs, result) do
