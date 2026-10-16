@@ -36,6 +36,12 @@ defmodule TidewakeWeb.Telemetry do
         tags: [:reason],
         unit: :millisecond
       ),
+      counter("tidewake.webhooks.delivery.retry_scheduled.count", tags: [:cause]),
+      summary("tidewake.webhooks.delivery.retry_scheduled.delay_ms",
+        tags: [:cause],
+        unit: :millisecond
+      ),
+      counter("tidewake.webhooks.delivery.retry_exhausted.count", tags: [:cause]),
       sum("tidewake.webhooks.delivery.recovery.recovered_count"),
       sum("tidewake.webhooks.delivery.recovery.skipped_count"),
       sum("tidewake.webhooks.delivery.recovery.error_count"),

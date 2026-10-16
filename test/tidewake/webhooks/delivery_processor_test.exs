@@ -4,6 +4,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   @delivery_cancelled [:tidewake, :webhooks, :delivery, :cancelled]
   @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
   @delivery_error [:tidewake, :webhooks, :delivery, :error]
+  @retry_scheduled [:tidewake, :webhooks, :delivery, :retry_scheduled]
+  @retry_exhausted [:tidewake, :webhooks, :delivery, :retry_exhausted]
 
   alias Tidewake.Webhooks
   alias Tidewake.Webhooks.DeliveryAdapters.Deterministic
@@ -231,6 +233,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   test "rejects missing signing configuration before claiming or delivering" do
     attach_telemetry(@delivery_error)
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     Application.delete_env(:tidewake, :webhook_signing_secret)
 
     result = DeliveryProcessor.process(delivery.id, __MODULE__)
@@ -244,11 +248,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
     assert measurements.count == 1
     refute inspect({result, measurements, metadata}) =~ "webhook_signing_secret"
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
   end
 
   test "rejects an invalid signing secret without exposing it or advancing state" do
     attach_telemetry(@delivery_error)
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     invalid_secret = "invalid-secret-must-not-leak"
     Application.put_env(:tidewake, :webhook_signing_secret, invalid_secret)
 
@@ -263,6 +270,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
     assert measurements.count == 1
     refute inspect({result, measurements, metadata}) =~ invalid_secret
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
   end
 
   test "cancels an inactive endpoint without encoding, delivering or creating an attempt" do
@@ -271,6 +279,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
     delivery = delivery_fixture()
     attach_cancelled_telemetry(delivery.id)
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
     assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
     before_processing = DateTime.utc_now()
@@ -316,6 +326,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     refute_received {:cancelled_telemetry, @delivery_cancelled, _, _, _}
     refute_received {:telemetry_event, @delivery_processed, _, _}
     refute_received {:telemetry_event, @delivery_error, _, _}
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
 
     assert {:error, :invalid_transition} =
              DeliveryProcessor.process(delivery.id, __MODULE__)
@@ -331,10 +342,12 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     refute_received {:delivered, _, _, _}
   end
 
-  for status <- [100, 199, 200, 204, 299, 300, 400, 409, 429, 503, 599] do
+  for status <- [100, 199, 200, 204, 299, 300, 400, 408, 409, 425, 429, 500, 502, 503, 504, 599] do
     test "persists and classifies HTTP #{status} with safe metadata and timing" do
       status = unquote(status)
       delivery = delivery_fixture()
+      attach_retry_telemetry(@retry_scheduled, delivery.id)
+      attach_retry_telemetry(@retry_exhausted, delivery.id)
 
       Process.put(:adapter_response, {
         :ok,
@@ -364,7 +377,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
                end)
 
       after_processing = DateTime.utc_now()
-      assert_received {:delivered, _, _, _}
+      assert_received {:delivered, request_url, request_body, request_headers}
       expected_status = expected_http_delivery_status(status)
       assert persisted.status == expected_status
       assert persisted.attempt_count == 1
@@ -396,12 +409,47 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         assert job.scheduled_at == attempt.next_attempt_at
         assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
         assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+
+        expected_cause = "http_#{status}"
+
+        expected_delay_ms =
+          DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
+
+        assert_received {:retry_telemetry, @retry_scheduled,
+                         %{count: 1, delay_ms: ^expected_delay_ms} = measurements,
+                         %{cause: ^expected_cause} = metadata, persisted_at_emission,
+                         [attempt_at_emission], [job_at_emission]}
+
+        assert Map.keys(measurements) |> Enum.sort() == [:count, :delay_ms]
+        assert Map.keys(metadata) == [:cause]
+        assert expected_delay_ms >= 0
+        assert persisted_at_emission == persisted
+        assert attempt_at_emission == attempt
+        assert job_at_emission.id == job.id
+        assert job_at_emission.scheduled_at == attempt.next_attempt_at
+
+        telemetry_data = inspect({measurements, metadata})
+
+        for prohibited <- [
+              request_url,
+              request_body,
+              header(request_headers, "Tidewake-Timestamp"),
+              header(request_headers, "Tidewake-Signature"),
+              "secret response body",
+              Application.fetch_env!(:tidewake, :webhook_signing_secret)
+            ] do
+          refute telemetry_data =~ prohibited
+        end
+
+        refute_received {:retry_telemetry, @retry_scheduled, _, _, _, _, _}
+        refute_received {:retry_telemetry, @retry_exhausted, _, _, _, _, _}
       else
         refute Map.has_key?(result, :job)
         assert persisted.completed_at == attempt.completed_at
         assert persisted.next_attempt_at == nil
         assert attempt.next_attempt_at == nil
         assert Repo.aggregate(Oban.Job, :count) == 0
+        refute_received {:retry_telemetry, _, _, _, _, _, _}
       end
 
       assert Webhooks.get_delivery(delivery.id) == persisted
@@ -494,6 +542,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
   test "rejects a stale logical attempt before calling the adapter" do
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
 
     persisted =
       delivery
@@ -507,10 +557,13 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert Webhooks.get_delivery(delivery.id) == persisted
     assert Webhooks.list_attempts(delivery) == []
     assert Repo.aggregate(Oban.Job, :count) == 0
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
   end
 
   test "rejects an early logical attempt before calling the adapter" do
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     next_attempt_at = ~U[2099-01-15 12:00:00.123456Z]
 
     persisted =
@@ -525,10 +578,13 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert Webhooks.get_delivery(delivery.id) == persisted
     assert Webhooks.list_attempts(delivery) == []
     assert Repo.aggregate(Oban.Job, :count) == 0
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
   end
 
   test "finalizes the sixth retryable failure as exhausted without another job" do
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     timestamp = ~U[2026-10-16 12:00:00.123456Z]
 
     for attempt_number <- 1..5 do
@@ -564,6 +620,18 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     refute Map.has_key?(result, :job)
     assert Enum.map(Webhooks.list_attempts(delivery), & &1.attempt_number) == Enum.to_list(1..6)
     assert Repo.aggregate(Oban.Job, :count) == 0
+
+    assert_received {:retry_telemetry, @retry_exhausted, measurements, metadata,
+                     persisted_at_emission, attempts_at_emission, jobs_at_emission}
+
+    assert measurements == %{count: 1}
+    assert metadata == %{cause: "http_503"}
+    assert persisted_at_emission == failed
+    assert List.last(attempts_at_emission) == attempt
+    assert length(attempts_at_emission) == 6
+    assert jobs_at_emission == []
+    refute_received {:retry_telemetry, @retry_exhausted, _, _, _, _, _}
+    refute_received {:retry_telemetry, @retry_scheduled, _, _, _, _, _}
   end
 
   for {reason, error_type, expected_status} <- [
@@ -579,6 +647,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       error_type = unquote(error_type)
       expected_status = unquote(expected_status)
       delivery = delivery_fixture()
+      attach_retry_telemetry(@retry_scheduled, delivery.id)
+      attach_retry_telemetry(@retry_exhausted, delivery.id)
       Process.put(:adapter_response, {:error, reason})
       before_processing = DateTime.utc_now()
 
@@ -619,12 +689,28 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         assert job.scheduled_at == attempt.next_attempt_at
         assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
         assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+
+        expected_cause = "transport_#{error_type}"
+
+        expected_delay_ms =
+          DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
+
+        assert_received {:retry_telemetry, @retry_scheduled,
+                         %{count: 1, delay_ms: ^expected_delay_ms}, %{cause: ^expected_cause},
+                         persisted_at_emission, [attempt_at_emission], [job_at_emission]}
+
+        assert persisted_at_emission == persisted
+        assert attempt_at_emission == attempt
+        assert job_at_emission.id == job.id
+        refute_received {:retry_telemetry, @retry_scheduled, _, _, _, _, _}
+        refute_received {:retry_telemetry, @retry_exhausted, _, _, _, _, _}
       else
         refute Map.has_key?(result, :job)
         assert persisted.completed_at == attempt.completed_at
         assert persisted.next_attempt_at == nil
         assert attempt.next_attempt_at == nil
         assert Repo.aggregate(Oban.Job, :count) == 0
+        refute_received {:retry_telemetry, _, _, _, _, _, _}
       end
 
       assert Webhooks.get_delivery(delivery.id) == persisted
@@ -701,6 +787,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     attach_telemetry(@delivery_error)
 
     delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
     timestamp = DateTime.utc_now()
 
     assert {:ok, existing_attempt} =
@@ -729,6 +817,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert is_integer(duration_ms)
     assert duration_ms >= 0
     refute_received {:telemetry_event, @delivery_processed, _, _}
+    refute_received {:retry_telemetry, _, _, _, _, _, _}
   end
 
   @doc false
@@ -742,6 +831,17 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       test_pid,
       {:cancelled_telemetry, event_name, measurements, metadata,
        Webhooks.get_delivery(delivery_id)}
+    )
+  end
+
+  @doc false
+  def handle_retry_telemetry(event_name, measurements, metadata, {test_pid, delivery_id}) do
+    persisted_delivery = Webhooks.get_delivery(delivery_id)
+
+    send(
+      test_pid,
+      {:retry_telemetry, event_name, measurements, metadata, persisted_delivery,
+       Webhooks.list_attempts(persisted_delivery), Repo.all(Oban.Job)}
     )
   end
 
@@ -773,6 +873,20 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 
+  defp attach_retry_telemetry(event_name, delivery_id) do
+    handler_id = {__MODULE__, event_name, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        event_name,
+        &__MODULE__.handle_retry_telemetry/4,
+        {self(), delivery_id}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
   defp assert_pending_without_attempt(delivery) do
     persisted = Webhooks.get_delivery(delivery.id)
     assert persisted.status == "pending"
@@ -787,7 +901,11 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   end
 
   defp expected_http_delivery_status(status) when status in 200..299, do: "succeeded"
-  defp expected_http_delivery_status(status) when status in [429, 503], do: "pending"
+
+  defp expected_http_delivery_status(status)
+       when status in [408, 425, 429, 500, 502, 503, 504],
+       do: "pending"
+
   defp expected_http_delivery_status(_status), do: "failed"
 
   defp delivery_fixture(endpoint_url \\ "https://endpoint.invalid/webhooks") do

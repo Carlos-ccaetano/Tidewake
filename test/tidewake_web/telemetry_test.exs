@@ -13,6 +13,9 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :delivery, :cancelled, :count],
     [:tidewake, :webhooks, :delivery, :error, :count],
     [:tidewake, :webhooks, :delivery, :error, :duration_ms],
+    [:tidewake, :webhooks, :delivery, :retry_scheduled, :count],
+    [:tidewake, :webhooks, :delivery, :retry_scheduled, :delay_ms],
+    [:tidewake, :webhooks, :delivery, :retry_exhausted, :count],
     [:tidewake, :webhooks, :delivery, :recovery, :recovered_count],
     [:tidewake, :webhooks, :delivery, :recovery, :skipped_count],
     [:tidewake, :webhooks, :delivery, :recovery, :error_count],
@@ -48,6 +51,25 @@ defmodule TidewakeWeb.TelemetryTest do
     assert %Summary{tags: [:reason], unit: :millisecond} =
              metric!(metrics, "tidewake.webhooks.delivery.error.duration_ms")
 
+    assert %Counter{
+             event_name: [:tidewake, :webhooks, :delivery, :retry_scheduled],
+             measurement: :count,
+             tags: [:cause]
+           } = metric!(metrics, "tidewake.webhooks.delivery.retry_scheduled.count")
+
+    assert %Summary{
+             event_name: [:tidewake, :webhooks, :delivery, :retry_scheduled],
+             measurement: :delay_ms,
+             tags: [:cause],
+             unit: :millisecond
+           } = metric!(metrics, "tidewake.webhooks.delivery.retry_scheduled.delay_ms")
+
+    assert %Counter{
+             event_name: [:tidewake, :webhooks, :delivery, :retry_exhausted],
+             measurement: :count,
+             tags: [:cause]
+           } = metric!(metrics, "tidewake.webhooks.delivery.retry_exhausted.count")
+
     assert %Sum{
              event_name: [:tidewake, :webhooks, :delivery, :recovery],
              measurement: :recovered_count,
@@ -77,7 +99,7 @@ defmodule TidewakeWeb.TelemetryTest do
            |> domain_metrics()
            |> Enum.flat_map(& &1.tags)
            |> Enum.uniq()
-           |> Enum.sort() == [:outcome, :reason]
+           |> Enum.sort() == [:cause, :outcome, :reason]
   end
 
   test "uses the expected event and measurement names" do
