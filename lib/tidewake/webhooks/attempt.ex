@@ -7,6 +7,7 @@ defmodule Tidewake.Webhooks.Attempt do
 
   @results ~w(succeeded http_error transport_error)
   @http_results ~w(succeeded http_error)
+  @retry_results ~w(http_error transport_error)
   @fields [
     :attempt_number,
     :result,
@@ -15,6 +16,7 @@ defmodule Tidewake.Webhooks.Attempt do
     :duration_ms,
     :started_at,
     :completed_at,
+    :next_attempt_at,
     :response_metadata
   ]
   @required_fields [
@@ -40,6 +42,7 @@ defmodule Tidewake.Webhooks.Attempt do
     field :duration_ms, :integer
     field :started_at, :utc_datetime_usec
     field :completed_at, :utc_datetime_usec
+    field :next_attempt_at, :utc_datetime_usec
     field :response_metadata, :map
 
     timestamps(type: :utc_datetime_usec)
@@ -55,6 +58,7 @@ defmodule Tidewake.Webhooks.Attempt do
     |> validate_number(:http_status, greater_than_or_equal_to: 100, less_than_or_equal_to: 599)
     |> validate_length(:error_type, max: @string_column_max_length)
     |> validate_timestamp_order()
+    |> validate_next_attempt_at()
     |> validate_http_status()
     |> validate_response_metadata()
     |> unique_constraint([:delivery_id, :attempt_number])
@@ -73,6 +77,38 @@ defmodule Tidewake.Webhooks.Attempt do
         changeset
     end
   end
+
+  defp validate_next_attempt_at(changeset) do
+    validate_next_attempt_at(
+      changeset,
+      get_field(changeset, :result),
+      get_field(changeset, :completed_at),
+      get_field(changeset, :next_attempt_at)
+    )
+  end
+
+  defp validate_next_attempt_at(changeset, _result, _completed_at, nil), do: changeset
+
+  defp validate_next_attempt_at(changeset, result, _completed_at, %DateTime{})
+       when result not in @retry_results do
+    add_error(changeset, :next_attempt_at, "is only allowed for HTTP or transport errors")
+  end
+
+  defp validate_next_attempt_at(
+         changeset,
+         _result,
+         %DateTime{} = completed_at,
+         %DateTime{} = next_attempt_at
+       ) do
+    if DateTime.compare(next_attempt_at, completed_at) == :gt do
+      changeset
+    else
+      add_error(changeset, :next_attempt_at, "must be later than completed_at")
+    end
+  end
+
+  defp validate_next_attempt_at(changeset, _result, _completed_at, _next_attempt_at),
+    do: changeset
 
   defp validate_http_status(changeset) do
     validate_http_status(

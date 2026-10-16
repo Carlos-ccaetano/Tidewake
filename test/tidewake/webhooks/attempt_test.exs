@@ -1,6 +1,7 @@
 defmodule Tidewake.Webhooks.AttemptTest do
   use Tidewake.DataCase, async: true
 
+  alias Tidewake.Webhooks
   alias Tidewake.Webhooks.{Attempt, Delivery}
 
   describe "schema" do
@@ -16,6 +17,7 @@ defmodule Tidewake.Webhooks.AttemptTest do
       assert Attempt.__schema__(:type, :duration_ms) == :integer
       assert Attempt.__schema__(:type, :started_at) == :utc_datetime_usec
       assert Attempt.__schema__(:type, :completed_at) == :utc_datetime_usec
+      assert Attempt.__schema__(:type, :next_attempt_at) == :utc_datetime_usec
       assert Attempt.__schema__(:type, :response_metadata) == :map
       assert Attempt.__schema__(:type, :inserted_at) == :utc_datetime_usec
       assert Attempt.__schema__(:type, :updated_at) == :utc_datetime_usec
@@ -151,6 +153,106 @@ defmodule Tidewake.Webhooks.AttemptTest do
       assert "must be equal to or later than started_at" in errors_on(changeset).completed_at
     end
 
+    test "accepts a scheduled retry for an HTTP failure" do
+      next_attempt_at = ~U[2026-09-10 10:00:10.248457Z]
+
+      changeset =
+        valid_changeset(%{
+          result: "http_error",
+          http_status: 503,
+          next_attempt_at: next_attempt_at
+        })
+
+      assert changeset.valid?
+      assert get_change(changeset, :next_attempt_at) == next_attempt_at
+    end
+
+    test "accepts a scheduled retry for a transport failure" do
+      next_attempt_at = ~U[2026-09-10 10:00:10.248457Z]
+
+      changeset =
+        valid_changeset(%{
+          result: "transport_error",
+          http_status: nil,
+          error_type: "timeout",
+          next_attempt_at: next_attempt_at
+        })
+
+      assert changeset.valid?
+      assert get_change(changeset, :next_attempt_at) == next_attempt_at
+    end
+
+    test "allows terminal failures to omit a retry schedule" do
+      assert valid_changeset(%{
+               result: "http_error",
+               http_status: 400,
+               next_attempt_at: nil
+             }).valid?
+
+      assert valid_changeset(%{
+               result: "transport_error",
+               http_status: nil,
+               error_type: "tls",
+               next_attempt_at: nil
+             }).valid?
+    end
+
+    test "rejects a retry schedule for a succeeded attempt" do
+      changeset = valid_changeset(%{next_attempt_at: ~U[2026-09-10 10:00:10.248457Z]})
+
+      refute changeset.valid?
+
+      assert "is only allowed for HTTP or transport errors" in errors_on(changeset).next_attempt_at
+    end
+
+    test "requires a retry schedule to be strictly later than completion" do
+      completed_at = ~U[2026-09-10 10:00:00.248456Z]
+
+      for next_attempt_at <- [completed_at, ~U[2026-09-10 10:00:00.248455Z]] do
+        changeset =
+          valid_changeset(%{
+            result: "http_error",
+            http_status: 503,
+            completed_at: completed_at,
+            next_attempt_at: next_attempt_at
+          })
+
+        refute changeset.valid?
+        assert "must be later than completed_at" in errors_on(changeset).next_attempt_at
+      end
+    end
+
+    test "rejects an invalid retry schedule type" do
+      changeset =
+        valid_changeset(%{
+          result: "http_error",
+          http_status: 503,
+          next_attempt_at: 123
+        })
+
+      refute changeset.valid?
+      assert "is invalid" in errors_on(changeset).next_attempt_at
+    end
+
+    test "persists a retry schedule with microsecond precision" do
+      next_attempt_at = ~U[2026-09-10 10:00:10.248457Z]
+      delivery = delivery_fixture()
+
+      attrs =
+        valid_attrs()
+        |> Map.merge(%{
+          result: "http_error",
+          http_status: 503,
+          next_attempt_at: next_attempt_at
+        })
+
+      assert {:ok, attempt} = Webhooks.create_attempt(delivery, attrs)
+      persisted = Webhooks.get_attempt(attempt.id)
+
+      assert persisted.next_attempt_at == next_attempt_at
+      assert persisted.next_attempt_at.microsecond == {248_457, 6}
+    end
+
     test "accepts only allowlisted response metadata without transforming it" do
       atom_keys = %{content_type: "application/json", content_length: 42, request_id: "req_123"}
 
@@ -254,5 +356,23 @@ defmodule Tidewake.Webhooks.AttemptTest do
         "request_id" => "req_123"
       }
     }
+  end
+
+  defp delivery_fixture do
+    {:ok, event} =
+      Webhooks.create_event(%{
+        external_id: "evt_attempt_next_attempt_at",
+        event_type: "order.created",
+        payload: %{"order" => %{"id" => "123"}}
+      })
+
+    {:ok, endpoint} =
+      Webhooks.create_endpoint(%{
+        name: "Attempt audit endpoint",
+        url: "https://endpoint.invalid/webhooks"
+      })
+
+    {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
+    delivery
   end
 end
