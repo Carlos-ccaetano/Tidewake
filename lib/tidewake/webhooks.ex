@@ -285,8 +285,10 @@ defmodule Tidewake.Webhooks do
            })
            |> Repo.update(),
          {:ok, job} <-
-           delivery.id
-           |> DeliverWebhookWorker.new_for_delivery()
+           DeliverWebhookWorker.new_for_delivery(
+             delivery.id,
+             delivery.attempt_count + 1
+           )
            |> Oban.insert() do
       if job.conflict? do
         Repo.rollback(:active_job)
