@@ -14,7 +14,24 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
   @delivery_cancelled [:tidewake, :webhooks, :delivery, :cancelled]
   @delivery_processed [:tidewake, :webhooks, :delivery, :processed]
   @delivery_error [:tidewake, :webhooks, :delivery, :error]
+  @retry_scheduled [:tidewake, :webhooks, :delivery, :retry_scheduled]
+  @retry_exhausted [:tidewake, :webhooks, :delivery, :retry_exhausted]
   @outcomes ~w(succeeded http_error transport_error)
+  @http_retry_causes %{
+    408 => "http_408",
+    425 => "http_425",
+    429 => "http_429",
+    500 => "http_500",
+    502 => "http_502",
+    503 => "http_503",
+    504 => "http_504"
+  }
+  @transport_retry_causes %{
+    "timeout" => "transport_timeout",
+    "dns" => "transport_dns",
+    "connection" => "transport_connection",
+    "closed" => "transport_closed"
+  }
 
   def process(delivery_id, adapter) do
     process(delivery_id, 1, adapter)
@@ -89,16 +106,68 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
 
   defp persist_outcome(delivery_id, attempt_number, attempt_attrs) do
     case RetryPolicy.classify(attempt_attrs, attempt_number) do
-      decision when decision in [:succeeded, :permanent_failure, :exhausted] ->
+      decision when decision in [:succeeded, :permanent_failure] ->
         Webhooks.finalize_delivery(delivery_id, attempt_attrs)
+
+      :exhausted ->
+        delivery_id
+        |> Webhooks.finalize_delivery(attempt_attrs)
+        |> emit_retry_exhausted()
 
       :retry ->
         with {:ok, delay_seconds} <- RetryBackoff.delay_seconds(attempt_number) do
           retry_at = DateTime.add(attempt_attrs.completed_at, delay_seconds, :second)
-          Webhooks.schedule_delivery_retry(delivery_id, attempt_attrs, retry_at)
+
+          delivery_id
+          |> Webhooks.schedule_delivery_retry(attempt_attrs, retry_at)
+          |> emit_retry_scheduled()
         end
     end
   end
+
+  defp emit_retry_scheduled({:ok, %{attempt: attempt}} = result) do
+    case retry_cause(attempt) do
+      {:ok, cause} ->
+        delay_ms = DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
+
+        :telemetry.execute(
+          @retry_scheduled,
+          %{count: 1, delay_ms: delay_ms},
+          %{cause: cause}
+        )
+
+      :error ->
+        :ok
+    end
+
+    result
+  end
+
+  defp emit_retry_scheduled(result), do: result
+
+  defp emit_retry_exhausted({:ok, %{attempt: attempt}} = result) do
+    case retry_cause(attempt) do
+      {:ok, cause} ->
+        :telemetry.execute(@retry_exhausted, %{count: 1}, %{cause: cause})
+
+      :error ->
+        :ok
+    end
+
+    result
+  end
+
+  defp emit_retry_exhausted(result), do: result
+
+  defp retry_cause(%{result: "http_error", http_status: status}) do
+    Map.fetch(@http_retry_causes, status)
+  end
+
+  defp retry_cause(%{result: "transport_error", error_type: error_type}) do
+    Map.fetch(@transport_retry_causes, error_type)
+  end
+
+  defp retry_cause(_attempt), do: :error
 
   defp emit_processing_telemetry(
          {:ok, %{delivery: %{status: "cancelled"}, attempt: nil}} = result,
