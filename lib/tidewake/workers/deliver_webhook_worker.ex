@@ -52,23 +52,25 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
       })
       when is_integer(id) and id > 0 and is_integer(attempt_number) and attempt_number > 0 and
              map_size(args) == 2 do
-    process_delivery(id)
+    process_delivery(id, attempt_number)
   end
 
   def perform(%Oban.Job{args: %{"delivery_id" => id} = args})
       when is_integer(id) and id > 0 and map_size(args) == 1 do
-    process_delivery(id)
+    process_delivery(id, 1)
   end
 
   def perform(%Oban.Job{}), do: {:cancel, :invalid_args}
 
-  defp process_delivery(id) do
+  defp process_delivery(id, attempt_number) do
     with {:ok, adapter} <- Application.fetch_env(:tidewake, :delivery_adapter),
-         {:ok, _result} <- DeliveryProcessor.process(id, adapter) do
+         {:ok, _result} <- DeliveryProcessor.process(id, attempt_number, adapter) do
       :ok
     else
       :error -> {:cancel, :adapter_not_configured}
       {:error, :not_found} -> {:cancel, :not_found}
+      {:error, :stale_attempt} -> {:cancel, :stale_attempt}
+      {:error, :not_due} -> {:cancel, :not_due}
       {:error, reason} -> {:error, reason}
     end
   end

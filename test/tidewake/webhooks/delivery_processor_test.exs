@@ -55,9 +55,13 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         delivery = delivery_fixture()
         Process.put(:adapter_response, response)
 
-        result = DeliveryProcessor.process(delivery.id, __MODULE__)
+        result =
+          Oban.Testing.with_testing_mode(:manual, fn ->
+            DeliveryProcessor.process(delivery.id, __MODULE__)
+          end)
+
         assert {:ok, %{delivery: finalized, attempt: attempt}} = result
-        assert_received {:delivered, _, _, request_headers}
+        assert_received {:delivered, _, request_body, request_headers}
 
         assert attempt.result == outcome
         assert Webhooks.get_delivery(delivery.id) == finalized
@@ -85,6 +89,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         refute telemetry_data =~ "internal_adapter_detail"
         refute telemetry_data =~ signing_timestamp
         refute telemetry_data =~ signature
+        refute inspect(result) =~ request_body
+        refute inspect(result) =~ signature
         refute inspect(result) =~ Application.fetch_env!(:tidewake, :webhook_signing_secret)
         refute telemetry_data =~ Application.fetch_env!(:tidewake, :webhook_signing_secret)
         refute_received {:telemetry_event, @delivery_error, _, _}
@@ -95,7 +101,8 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       attach_telemetry(@delivery_processed)
       attach_telemetry(@delivery_error)
 
-      assert {:error, :not_found} = DeliveryProcessor.process(-1, __MODULE__)
+      assert {:error, :not_found} =
+               DeliveryProcessor.process(2_147_483_647, __MODULE__)
 
       assert_received {:telemetry_event, @delivery_error, %{count: 1, duration_ms: duration_ms},
                        %{reason: "not_found"}}
@@ -318,12 +325,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
   end
 
   test "propagates not found without calling the adapter" do
-    assert {:error, :not_found} = DeliveryProcessor.process(-1, __MODULE__)
+    assert {:error, :not_found} =
+             DeliveryProcessor.process(2_147_483_647, __MODULE__)
+
     refute_received {:delivered, _, _, _}
   end
 
-  for status <- [100, 199, 200, 204, 299, 300, 400, 429, 503, 599] do
-    test "persists HTTP #{status} with safe metadata and timing" do
+  for status <- [100, 199, 200, 204, 299, 300, 400, 409, 429, 503, 599] do
+    test "persists and classifies HTTP #{status} with safe metadata and timing" do
       status = unquote(status)
       delivery = delivery_fixture()
 
@@ -349,14 +358,16 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
       before_processing = DateTime.utc_now()
 
-      assert {:ok, %{delivery: finalized, attempt: attempt}} =
-               DeliveryProcessor.process(delivery.id, __MODULE__)
+      assert {:ok, %{delivery: persisted, attempt: attempt} = result} =
+               Oban.Testing.with_testing_mode(:manual, fn ->
+                 DeliveryProcessor.process(delivery.id, 1, __MODULE__)
+               end)
 
       after_processing = DateTime.utc_now()
       assert_received {:delivered, _, _, _}
-      assert finalized.status == if(status in 200..299, do: "succeeded", else: "failed")
-      assert finalized.attempt_count == 1
-      assert finalized.completed_at == attempt.completed_at
+      expected_status = expected_http_delivery_status(status)
+      assert persisted.status == expected_status
+      assert persisted.attempt_count == 1
       assert attempt.delivery_id == delivery.id
       assert attempt.attempt_number == 1
       assert attempt.result == if(status in 200..299, do: "succeeded", else: "http_error")
@@ -378,17 +389,37 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
                "request_id" => "req_processor"
              }
 
-      assert Webhooks.get_delivery(delivery.id) == finalized
+      if expected_status == "pending" do
+        assert %{job: job} = result
+        assert persisted.completed_at == nil
+        assert persisted.next_attempt_at == attempt.next_attempt_at
+        assert job.scheduled_at == attempt.next_attempt_at
+        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+        assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+      else
+        refute Map.has_key?(result, :job)
+        assert persisted.completed_at == attempt.completed_at
+        assert persisted.next_attempt_at == nil
+        assert attempt.next_attempt_at == nil
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end
+
+      assert Webhooks.get_delivery(delivery.id) == persisted
       assert Webhooks.list_attempts(delivery) == [attempt]
 
-      assert {:error, :invalid_transition} = DeliveryProcessor.process(delivery.id, __MODULE__)
+      expected_repeat_error =
+        if expected_status == "pending", do: :stale_attempt, else: :invalid_transition
+
+      assert {:error, ^expected_repeat_error} =
+               DeliveryProcessor.process(delivery.id, 1, __MODULE__)
+
       refute_received {:delivered, _, _, _}
-      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.get_delivery(delivery.id) == persisted
       assert Webhooks.list_attempts(delivery) == [attempt]
     end
   end
 
-  test "discards invalid metadata values from a valid HTTP error response" do
+  test "discards invalid metadata values while scheduling a retryable HTTP response" do
     delivery = delivery_fixture()
 
     Process.put(:adapter_response, {
@@ -404,13 +435,17 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       }
     })
 
-    assert {:ok, %{delivery: finalized, attempt: attempt}} =
-             DeliveryProcessor.process(delivery.id, __MODULE__)
+    assert {:ok, %{delivery: pending, attempt: attempt, job: job}} =
+             Oban.Testing.with_testing_mode(:manual, fn ->
+               DeliveryProcessor.process(delivery.id, __MODULE__)
+             end)
 
-    assert finalized.status == "failed"
+    assert pending.status == "pending"
     assert attempt.result == "http_error"
     assert attempt.http_status == 503
     assert attempt.response_metadata == nil
+    assert attempt.next_attempt_at == pending.next_attempt_at
+    assert job.scheduled_at == pending.next_attempt_at
     assert Webhooks.list_attempts(delivery) == [attempt]
   end
 
@@ -457,29 +492,105 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert Webhooks.list_attempts(delivery) == [result.attempt]
   end
 
-  for {reason, error_type} <- [
-        timeout: "timeout",
-        dns_error: "dns",
-        tls_error: "tls",
-        connection_refused: "connection",
-        connection_closed: "closed",
-        internal_adapter_detail: "unknown"
+  test "rejects a stale logical attempt before calling the adapter" do
+    delivery = delivery_fixture()
+
+    persisted =
+      delivery
+      |> change(attempt_count: 1)
+      |> Repo.update!()
+
+    assert {:error, :stale_attempt} =
+             DeliveryProcessor.process(delivery.id, 1, __MODULE__)
+
+    refute_received {:delivered, _, _, _}
+    assert Webhooks.get_delivery(delivery.id) == persisted
+    assert Webhooks.list_attempts(delivery) == []
+    assert Repo.aggregate(Oban.Job, :count) == 0
+  end
+
+  test "rejects an early logical attempt before calling the adapter" do
+    delivery = delivery_fixture()
+    next_attempt_at = ~U[2099-01-15 12:00:00.123456Z]
+
+    persisted =
+      delivery
+      |> change(next_attempt_at: next_attempt_at)
+      |> Repo.update!()
+
+    assert {:error, :not_due} =
+             DeliveryProcessor.process(delivery.id, 1, __MODULE__)
+
+    refute_received {:delivered, _, _, _}
+    assert Webhooks.get_delivery(delivery.id) == persisted
+    assert Webhooks.list_attempts(delivery) == []
+    assert Repo.aggregate(Oban.Job, :count) == 0
+  end
+
+  test "finalizes the sixth retryable failure as exhausted without another job" do
+    delivery = delivery_fixture()
+    timestamp = ~U[2026-10-16 12:00:00.123456Z]
+
+    for attempt_number <- 1..5 do
+      assert {:ok, _attempt} =
+               Webhooks.create_attempt(delivery, %{
+                 attempt_number: attempt_number,
+                 result: "http_error",
+                 http_status: 503,
+                 duration_ms: 0,
+                 started_at: timestamp,
+                 completed_at: timestamp
+               })
+    end
+
+    delivery
+    |> change(attempt_count: 5)
+    |> Repo.update!()
+
+    Process.put(:adapter_response, {:ok, %{status: 503, headers: []}})
+
+    assert {:ok, %{delivery: failed, attempt: attempt} = result} =
+             DeliveryProcessor.process(delivery.id, 6, __MODULE__)
+
+    assert_received {:delivered, _, _, _}
+    assert failed.status == "failed"
+    assert failed.attempt_count == 6
+    assert failed.completed_at == attempt.completed_at
+    assert failed.next_attempt_at == nil
+    assert attempt.attempt_number == 6
+    assert attempt.result == "http_error"
+    assert attempt.http_status == 503
+    assert attempt.next_attempt_at == nil
+    refute Map.has_key?(result, :job)
+    assert Enum.map(Webhooks.list_attempts(delivery), & &1.attempt_number) == Enum.to_list(1..6)
+    assert Repo.aggregate(Oban.Job, :count) == 0
+  end
+
+  for {reason, error_type, expected_status} <- [
+        {:timeout, "timeout", "pending"},
+        {:dns_error, "dns", "pending"},
+        {:tls_error, "tls", "failed"},
+        {:connection_refused, "connection", "pending"},
+        {:connection_closed, "closed", "pending"},
+        {:internal_adapter_detail, "unknown", "failed"}
       ] do
-    test "persists transport failure #{reason} as #{error_type}" do
+    test "persists and classifies transport failure #{reason} as #{error_type}" do
       reason = unquote(reason)
       error_type = unquote(error_type)
+      expected_status = unquote(expected_status)
       delivery = delivery_fixture()
       Process.put(:adapter_response, {:error, reason})
       before_processing = DateTime.utc_now()
 
-      assert {:ok, %{delivery: finalized, attempt: attempt}} =
-               DeliveryProcessor.process(delivery.id, __MODULE__)
+      assert {:ok, %{delivery: persisted, attempt: attempt} = result} =
+               Oban.Testing.with_testing_mode(:manual, fn ->
+                 DeliveryProcessor.process(delivery.id, 1, __MODULE__)
+               end)
 
       after_processing = DateTime.utc_now()
       assert_received {:delivered, _, _, _}
-      assert finalized.status == "failed"
-      assert finalized.attempt_count == 1
-      assert finalized.completed_at == attempt.completed_at
+      assert persisted.status == expected_status
+      assert persisted.attempt_count == 1
       assert attempt.delivery_id == delivery.id
       assert attempt.attempt_number == 1
       assert attempt.result == "transport_error"
@@ -500,7 +611,23 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
       assert DateTime.compare(attempt.started_at, before_processing) in [:eq, :gt]
       assert DateTime.compare(attempt.completed_at, attempt.started_at) in [:eq, :gt]
       assert DateTime.compare(attempt.completed_at, after_processing) in [:eq, :lt]
-      assert Webhooks.get_delivery(delivery.id) == finalized
+
+      if expected_status == "pending" do
+        assert %{job: job} = result
+        assert persisted.completed_at == nil
+        assert persisted.next_attempt_at == attempt.next_attempt_at
+        assert job.scheduled_at == attempt.next_attempt_at
+        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+        assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+      else
+        refute Map.has_key?(result, :job)
+        assert persisted.completed_at == attempt.completed_at
+        assert persisted.next_attempt_at == nil
+        assert attempt.next_attempt_at == nil
+        assert Repo.aggregate(Oban.Job, :count) == 0
+      end
+
+      assert Webhooks.get_delivery(delivery.id) == persisted
       assert Webhooks.list_attempts(delivery) == [attempt]
     end
   end
@@ -658,6 +785,10 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     {^name, value} = List.keyfind(headers, name, 0)
     value
   end
+
+  defp expected_http_delivery_status(status) when status in 200..299, do: "succeeded"
+  defp expected_http_delivery_status(status) when status in [429, 503], do: "pending"
+  defp expected_http_delivery_status(_status), do: "failed"
 
   defp delivery_fixture(endpoint_url \\ "https://endpoint.invalid/webhooks") do
     {:ok, event} =
