@@ -4,11 +4,27 @@
 
 Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Every route under `/api`, including these event operations, requires the configured static API token. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
 
-Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. During deterministic delivery processing, the configured signing secret is validated before claim, the envelope is serialized once, and its exact bytes are signed. The processor prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` with `content-type: application/json` and passes the same body to the adapter. The secret, signature, and signing timestamp are not persisted.
+Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. During delivery processing, the configured signing secret is validated before claim, the envelope is serialized once per attempt, and its exact bytes are signed. The processor prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` with `content-type: application/json` and passes the same body to the adapter. Every actual attempt receives a fresh timestamp and signature; the secret and signing material are not persisted.
 
-Tests continue to configure the deterministic adapter as the current default; it performs no network I/O. Req is inactive, so there is no production HTTP delivery. SSRF protection, a hard response-byte limit, retries, and backoff remain pending. Signature verification, timestamp validation, and replay protection are responsibilities of the receiver.
+Development and tests use the deterministic adapter by default, while production uses Req with public-destination validation, pinned DNS resolution, redirects and Req retries disabled, and a 65,536-byte response-body limit. Tidewake applies its own bounded automatic retry policy after a normalized response or transport failure. Signature verification, timestamp validation, event idempotency, and replay protection remain responsibilities of the receiver.
 
 An Oban worker runs every minute to recover at most 100 deliveries left in `processing` for at least five minutes. Each eligible delivery returns to `pending` with a replacement job, without creating a new attempt or changing `attempt_count`. This preserves at-least-once processing semantics: work may run again when its previous outcome was not persisted. Each recovery batch emits Telemetry with recovered, skipped, and error counts plus its duration.
+
+## Automatic delivery retries
+
+A delivery begins in `pending`, moves to `processing` when its numbered job is claimed, and then either reaches a terminal state or returns to `pending` with a future schedule. A successful `200..299` response sets the delivery to `succeeded`. A permanent failure, or a retryable failure on the sixth total attempt, sets it to `failed`. If the endpoint is inactive when due work is claimed, the delivery becomes `cancelled` without sending HTTP or adding an attempt.
+
+Only these HTTP responses are retryable: `408`, `425`, `429`, `500`, `502`, `503`, and `504`. Only the normalized transport outcomes `timeout`, `dns`, `connection`, and `closed` are retryable. Other HTTP responses, including `409`, and transport outcomes such as `tls`, `destination`, `response_limit`, and `unknown` are terminal. Unknown or malformed outcomes do not become eligible for retry.
+
+The delay uses exponential backoff with a 10-second base and a 300-second ceiling. Equal jitter selects an integer delay from the inclusive range between half of the calculated ceiling, rounded up, and the full ceiling. With the current six-attempt budget, the five possible retry ranges are 5–10, 10–20, 20–40, 40–80, and 80–160 seconds. Tidewake does not currently honor `Retry-After`.
+
+Oban executes each logical attempt job once (`max_attempts: 1`); a retryable application outcome completes that job successfully. Tidewake then schedules a distinct successor whose arguments contain only `delivery_id` and `attempt_number`. The claim locks the delivery and requires that number to equal `delivery.attempt_count + 1`; it also refuses to run before `Delivery.next_attempt_at`. These guards prevent stale, duplicate, future-numbered, and early jobs from sending HTTP.
+
+For a retry, the failed `Attempt`, the delivery's return to `pending`, and the successor Oban job are committed in one database transaction. `Attempt.next_attempt_at` is the historical record of the schedule chosen by that failure. `Delivery.next_attempt_at` is the current outstanding schedule and is cleared when the retry is claimed or the delivery becomes terminal. A rollback cannot leave a retry attempt without a job or a job without its corresponding delivery state.
+
+The event ID, type, and payload remain unchanged across attempts, but Tidewake generates a new signing timestamp and HMAC signature after each successful claim. Ironhold returns `202 Accepted` for a freshly signed retry of an identical event, allowing it to follow the ordinary success path. Reusing the exact signing material or changing content under the same event ID remains a receiver-side conflict; Tidewake treats a generic `409 Conflict` as terminal.
+
+Committed retry schedules emit `tidewake.webhooks.delivery.retry_scheduled.count` and `tidewake.webhooks.delivery.retry_scheduled.delay_ms`; confirmed exhaustion emits `tidewake.webhooks.delivery.retry_exhausted.count`. The only tag is an allowlisted cause such as `http_503` or `transport_timeout`. These signals exclude IDs, URLs, payloads, request and response bodies or headers, signing timestamps, signatures, secrets, job IDs, changesets, database details, stack traces, and raw adapter errors.
 
 ## Operations
 
@@ -229,7 +245,7 @@ Each delivery contains exactly these fields:
 | `endpoint_id` | Internal ID of the destination endpoint, without exposing its configuration. |
 | `status` | Current persisted delivery state: `pending`, `processing`, `succeeded`, `failed`, or `cancelled`. `pending` does not mean that a webhook was sent. |
 | `attempt_count` | Number of processing attempts persisted for the delivery. |
-| `next_attempt_at` | Scheduled time for a future attempt as a UTC ISO 8601 string, or `null` when absent. Retries are not implemented at this stage. |
+| `next_attempt_at` | Current scheduled time for a future attempt as a UTC ISO 8601 string, or `null` when no retry is pending. Historical retry times remain on the attempts that scheduled them and are not exposed by this endpoint. |
 | `completed_at` | Completion time as a UTC ISO 8601 string, or `null` while incomplete. |
 | `inserted_at` | Creation time as a UTC ISO 8601 string. |
 | `updated_at` | Last update time as a UTC ISO 8601 string. |
@@ -263,10 +279,10 @@ Returned when the event does not exist or the path value is invalid, negative, o
 
 - Endpoint management operations, documented separately in the [endpoint management API](endpoints.md).
 - Delivery mutation and attempt retrieval through this API; only delivery status listing is available.
-- Activation of outbound HTTP requests with Req, including complete SSRF protection and a hard response-byte limit.
-- Retries and backoff.
+- `Retry-After` response handling and manual retry operations.
+- Retry management UI and external alerts.
 - Receiver-side signature verification, timestamp validation, and replay protection.
 - Users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token.
 - Event listing, updates, and deletion.
 
-Deterministic local processing, signing-header preparation, cancellation, and stale-delivery recovery do not mean that external webhook delivery, retries, or backoff are active.
+The delivery-status API is observational only: it does not trigger a retry or expose attempt history. Automatic retries run from persisted jobs; manual retry controls, retry UI, external alerting, and `Retry-After` support remain pending.
