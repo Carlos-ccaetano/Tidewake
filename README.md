@@ -2,13 +2,15 @@
 
 Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` acknowledges durable ingestion, not completed delivery. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record delivery outcomes, periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, cancellation, and recovery, and declarative domain metrics are available.
+The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint, and one initial Oban job per delivery; `201 Created` acknowledges durable ingestion, not completed delivery. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record delivery outcomes and schedule bounded automatic retries for allowlisted transient failures. Periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, retries, cancellation, and recovery, and declarative domain metrics are available.
 
 Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
 
-For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once, and signs those exact bytes. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
+For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once per actual attempt, and signs those exact bytes with a fresh timestamp. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
 
-Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a configured static Bearer token. Project ownership and authorization, users and token rotation, delivery retries and backoff, receiver-side replay protection and secret rotation, rate limiting, audit records, the operational LiveView, a metrics reporter, and production deployment remain pending.
+Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a configured static Bearer token.
+
+Automatic retries use explicit transient and permanent classifications, a six-attempt budget, bounded exponential backoff with equal jitter, guarded attempt-aware claims, and transactional successor scheduling. Manual retry with its own audit record, `Retry-After`, retention and payload policy, project ownership and authorization, users and token rotation, rate limiting, secret rotation, the operational LiveView, a metrics reporter, external alerts, and production deployment remain pending.
 
 ## Relationship with Ironhold
 
@@ -18,17 +20,20 @@ Tidewake and Ironhold are separate systems and separate repositories. In the int
 
 This repository does not contain or modify Ironhold.
 
+Each Tidewake attempt uses a fresh timestamp and signature. Ironhold acknowledges a freshly signed retry of an identical stored envelope with the same generic `202 Accepted` response, while exact signature reuse and conflicting content under the same event ID remain conflicts.
+
 ## Planned architecture
 
     Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
 
-Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. Production workers can deliver signed requests through the guarded Req transport. The broader architecture will eventually:
+Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. The production adapter can deliver signed requests through the guarded Req transport when deployed and configured. Automatic retries already classify transient outcomes, apply bounded exponential backoff with equal jitter, reject stale or duplicate jobs during claim, and persist each failed attempt, pending delivery state, and successor job atomically. The broader architecture will eventually:
 
-- retry transient failures with exponential backoff;
-- enforce idempotency at the delivery boundary;
+- expose manual retry with a dedicated audit record and support `Retry-After` where appropriate;
+- define retention and payload policy and add project-scoped authorization and rate limiting;
 - expose operational history through Phoenix LiveView;
 - publish the available domain metrics through a reporter;
-- emit structured logs and basic audit information.
+- emit structured logs, external alerts, and broader audit information;
+- provide production deployment and rollback guidance.
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
@@ -198,17 +203,17 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint, event, delivery, attempt, transactional fan-out, stale-delivery recovery, envelope encoding, signature generation, safe target preparation, and bounded response consumption live in `Tidewake.Webhooks`. Ingestion, processing, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, transactional fan-out, attempt-aware retry scheduling, stale-delivery recovery, envelope encoding, signature generation, safe target preparation, and bounded response consumption live in `Tidewake.Webhooks`. Ingestion, processing, retry scheduling and exhaustion, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Outbound HTTP delivery is active in production; retries and idempotency hardening remain pending.
+3. Outbound HTTP delivery and bounded automatic retries are implemented. The reliability milestone remains in progress while manual retry, `Retry-After`, retention and payload policy, and related hardening remain pending.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 
-The roadmap is directional, not a claim that the listed delivery features already exist. See [roadmap.md](docs/roadmap.md) for acceptance goals.
+The roadmap is directional and distinguishes implemented behavior from remaining work. See [roadmap.md](docs/roadmap.md) for acceptance goals.
 
 ## Contributing and security
 
