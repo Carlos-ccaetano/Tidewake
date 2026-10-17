@@ -50,7 +50,7 @@ Implemented:
 - bounded Telemetry events for confirmed ingestion, rejection, delivery processing, cancellation, controlled processing errors, and recovery batches;
 - declarative domain metrics for ingestion, rejection reasons, deliveries created, processing outcomes and duration, cancellation, controlled error reasons and duration, and recovered, skipped, and controlled-error recovery counts plus batch duration.
 
-This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Safe external delivery and project ownership belong to Milestone 2; retries and backoff remain in Milestone 3; the operational interface and metrics reporter remain in Milestone 4; and production deployment remains in Milestone 5.
+This milestone is complete. Its authentication and stale-delivery recovery acceptance gaps are resolved for the durable deterministic path. Safe external delivery and project ownership belong to Milestone 2; bounded automatic retries are implemented under Milestone 3, whose remaining reliability work is still open; the operational interface and metrics reporter remain in Milestone 4; and production deployment remains in Milestone 5.
 
 ## Milestone 2: endpoints and outbound delivery
 
@@ -83,11 +83,24 @@ Planned:
 
 ## Milestone 3: retry and idempotency hardening
 
-- classify transient and permanent failures;
-- apply bounded exponential backoff with jitter;
-- prevent duplicate concurrent deliveries;
-- expose manual retry with an audit record;
-- define retention and payload-size limits.
+Status: in progress
+
+Completed:
+
+- classify transient and permanent HTTP and transport outcomes through explicit allowlists that fail closed;
+- limit each delivery to six total attempts and apply exponential backoff with a 10-second base, a 300-second ceiling, and equal jitter;
+- identify jobs by `delivery_id` and logical `attempt_number`, and reject stale, duplicate, future-numbered, or early work under the delivery claim lock before sending HTTP;
+- persist the failed attempt, pending delivery state, and exactly one successor job atomically;
+- generate fresh signing material for each actual attempt, allowing Ironhold to acknowledge an identical freshly signed retry with its generic `202 Accepted` response;
+- expose bounded Telemetry for committed retry schedules and confirmed retry exhaustion without identifiers or signing material.
+
+Planned:
+
+- expose manual retry with its own audit record;
+- support `Retry-After` without weakening the bounded retry policy;
+- define retention and payload-size policy.
+
+This milestone is not complete while these planned items remain open.
 
 ## Milestone 4: operational interface
 
@@ -95,7 +108,8 @@ Planned:
 - filters for state, endpoint, and time range;
 - attempt detail without secret or payload leakage;
 - a reporter and operational views for the available domain metrics, plus queue, latency, and retry metrics;
-- structured logs and basic administrative audit history.
+- structured logs and basic administrative audit history;
+- external alerts and operational notification routing.
 
 ## Milestone 5: production readiness
 
