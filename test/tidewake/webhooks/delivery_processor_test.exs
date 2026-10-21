@@ -589,7 +589,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
 
     for attempt_number <- 1..5 do
       assert {:ok, _attempt} =
-               Webhooks.create_attempt(delivery, %{
+               Webhooks.create_attempt(%{delivery | cycle_attempt_count: attempt_number - 1}, %{
                  attempt_number: attempt_number,
                  result: "http_error",
                  http_status: 503,
@@ -600,7 +600,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     end
 
     delivery
-    |> change(attempt_count: 5)
+    |> change(attempt_count: 5, cycle_attempt_count: 5)
     |> Repo.update!()
 
     Process.put(:adapter_response, {:ok, %{status: 503, headers: []}})
