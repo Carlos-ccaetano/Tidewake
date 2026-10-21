@@ -3,7 +3,7 @@ defmodule Tidewake.Webhooks.Attempt do
 
   import Ecto.Changeset
 
-  alias Tidewake.Webhooks.Delivery
+  alias Tidewake.Webhooks.{Delivery, RetryPolicy}
 
   @results ~w(succeeded http_error transport_error)
   @http_results ~w(succeeded http_error)
@@ -22,6 +22,8 @@ defmodule Tidewake.Webhooks.Attempt do
   @required_fields [
     :delivery_id,
     :attempt_number,
+    :retry_cycle,
+    :cycle_attempt_number,
     :result,
     :duration_ms,
     :started_at,
@@ -36,6 +38,8 @@ defmodule Tidewake.Webhooks.Attempt do
     belongs_to :delivery, Delivery
 
     field :attempt_number, :integer
+    field :retry_cycle, :integer
+    field :cycle_attempt_number, :integer
     field :result, :string
     field :http_status, :integer
     field :error_type, :string
@@ -51,9 +55,16 @@ defmodule Tidewake.Webhooks.Attempt do
   def changeset(attempt, attrs) do
     attempt
     |> cast(attrs, @fields)
+    |> force_change(:retry_cycle, attempt.retry_cycle)
+    |> force_change(:cycle_attempt_number, attempt.cycle_attempt_number)
     |> validate_required(@required_fields)
     |> validate_inclusion(:result, @results)
     |> validate_number(:attempt_number, greater_than: 0)
+    |> validate_number(:retry_cycle, greater_than_or_equal_to: 0)
+    |> validate_number(:cycle_attempt_number,
+      greater_than_or_equal_to: 1,
+      less_than_or_equal_to: RetryPolicy.max_attempts()
+    )
     |> validate_number(:duration_ms, greater_than_or_equal_to: 0)
     |> validate_number(:http_status, greater_than_or_equal_to: 100, less_than_or_equal_to: 599)
     |> validate_length(:error_type, max: @string_column_max_length)

@@ -2,7 +2,7 @@ defmodule Tidewake.Webhooks.AttemptTest do
   use Tidewake.DataCase, async: true
 
   alias Tidewake.Webhooks
-  alias Tidewake.Webhooks.{Attempt, Delivery}
+  alias Tidewake.Webhooks.{Attempt, Delivery, RetryPolicy}
 
   describe "schema" do
     test "maps the delivery association and attempt fields" do
@@ -11,6 +11,8 @@ defmodule Tidewake.Webhooks.AttemptTest do
       assert delivery_association.related == Delivery
       assert delivery_association.owner_key == :delivery_id
       assert Attempt.__schema__(:type, :attempt_number) == :integer
+      assert Attempt.__schema__(:type, :retry_cycle) == :integer
+      assert Attempt.__schema__(:type, :cycle_attempt_number) == :integer
       assert Attempt.__schema__(:type, :result) == :string
       assert Attempt.__schema__(:type, :http_status) == :integer
       assert Attempt.__schema__(:type, :error_type) == :string
@@ -31,6 +33,8 @@ defmodule Tidewake.Webhooks.AttemptTest do
 
       assert changeset.valid?
       assert get_field(changeset, :delivery_id) == 1
+      assert get_field(changeset, :retry_cycle) == 0
+      assert get_field(changeset, :cycle_attempt_number) == 1
       assert get_change(changeset, :attempt_number) == attrs.attempt_number
       assert get_change(changeset, :result) == attrs.result
       assert get_change(changeset, :http_status) == attrs.http_status
@@ -46,6 +50,8 @@ defmodule Tidewake.Webhooks.AttemptTest do
       refute changeset.valid?
       assert "can't be blank" in errors.delivery_id
       assert "can't be blank" in errors.attempt_number
+      assert "can't be blank" in errors.retry_cycle
+      assert "can't be blank" in errors.cycle_attempt_number
       assert "can't be blank" in errors.result
       assert "can't be blank" in errors.duration_ms
       assert "can't be blank" in errors.started_at
@@ -63,6 +69,70 @@ defmodule Tidewake.Webhooks.AttemptTest do
       assert existing_delivery.valid?
       assert get_field(existing_delivery, :delivery_id) == 1
       refute Map.has_key?(existing_delivery.changes, :delivery_id)
+    end
+
+    test "does not cast or replace cycle identity from attributes" do
+      for attrs <- [
+            %{retry_cycle: 2, cycle_attempt_number: 6},
+            %{"retry_cycle" => 2, "cycle_attempt_number" => 6}
+          ] do
+        missing_identity = Attempt.changeset(%Attempt{delivery_id: 1}, attrs)
+        refute missing_identity.valid?
+        assert "can't be blank" in errors_on(missing_identity).retry_cycle
+        assert "can't be blank" in errors_on(missing_identity).cycle_attempt_number
+
+        base_attrs =
+          if Map.has_key?(attrs, "retry_cycle"),
+            do: Map.new(valid_attrs(), fn {key, value} -> {Atom.to_string(key), value} end),
+            else: valid_attrs()
+
+        changeset =
+          Attempt.changeset(
+            %Attempt{delivery_id: 1, retry_cycle: 0, cycle_attempt_number: 1},
+            Map.merge(base_attrs, attrs)
+          )
+
+        assert changeset.valid?
+        assert get_field(changeset, :retry_cycle) == 0
+        assert get_field(changeset, :cycle_attempt_number) == 1
+        assert get_change(changeset, :retry_cycle) == 0
+        assert get_change(changeset, :cycle_attempt_number) == 1
+      end
+    end
+
+    test "validates programmatically assigned cycle identity" do
+      attrs = valid_attrs()
+
+      for retry_cycle <- [-1] do
+        changeset =
+          Attempt.changeset(
+            %Attempt{delivery_id: 1, retry_cycle: retry_cycle, cycle_attempt_number: 1},
+            attrs
+          )
+
+        refute changeset.valid?
+        assert "must be greater than or equal to 0" in errors_on(changeset).retry_cycle
+      end
+
+      for cycle_attempt_number <- [0, RetryPolicy.max_attempts() + 1] do
+        changeset =
+          Attempt.changeset(
+            %Attempt{delivery_id: 1, retry_cycle: 0, cycle_attempt_number: cycle_attempt_number},
+            attrs
+          )
+
+        refute changeset.valid?
+        assert Map.has_key?(errors_on(changeset), :cycle_attempt_number)
+      end
+
+      assert Attempt.changeset(
+               %Attempt{
+                 delivery_id: 1,
+                 retry_cycle: 0,
+                 cycle_attempt_number: RetryPolicy.max_attempts()
+               },
+               attrs
+             ).valid?
     end
 
     test "accepts the three normalized results with their HTTP status rules" do
@@ -338,7 +408,7 @@ defmodule Tidewake.Webhooks.AttemptTest do
   defp valid_changeset(overrides \\ %{}) do
     attrs = Map.merge(valid_attrs(), overrides)
 
-    Attempt.changeset(%Attempt{delivery_id: 1}, attrs)
+    Attempt.changeset(%Attempt{delivery_id: 1, retry_cycle: 0, cycle_attempt_number: 1}, attrs)
   end
 
   defp valid_attrs do

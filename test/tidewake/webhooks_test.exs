@@ -866,9 +866,13 @@ defmodule Tidewake.WebhooksTest do
             result: "http_error",
             http_status: 503,
             attempt_number: 999,
+            retry_cycle: 3,
+            cycle_attempt_number: 6,
             next_attempt_at: ~U[2098-01-15 12:00:00.000000Z]
           })
           |> Map.put("attempt_number", 998)
+          |> Map.put("retry_cycle", 2)
+          |> Map.put("cycle_attempt_number", 5)
           |> Map.put("next_attempt_at", ~U[2097-01-15 12:00:00.000000Z])
 
         assert {:ok, %{delivery: pending, attempt: attempt, job: job}} =
@@ -876,12 +880,16 @@ defmodule Tidewake.WebhooksTest do
 
         assert attempt.delivery_id == processing.id
         assert attempt.attempt_number == 1
+        assert attempt.retry_cycle == 0
+        assert attempt.cycle_attempt_number == 1
         assert attempt.result == "http_error"
         assert attempt.http_status == 503
         assert attempt.next_attempt_at == retry_at
 
         assert pending.status == "pending"
         assert pending.attempt_count == 1
+        assert pending.retry_cycle == 0
+        assert pending.cycle_attempt_count == 1
         assert pending.next_attempt_at == retry_at
         assert pending.completed_at == nil
 
@@ -895,6 +903,58 @@ defmodule Tidewake.WebhooksTest do
         assert Webhooks.list_attempts(pending) == [attempt]
         assert Repo.get!(Oban.Job, job.id).scheduled_at == retry_at
         assert Repo.aggregate(Oban.Job, :count) == 1
+      end)
+    end
+
+    test "subsequent retries preserve monotonic lifetime and cycle attempt numbers" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_monotonic_attempts")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+
+        failure_attrs =
+          Map.merge(valid_attempt_attrs(), %{result: "http_error", http_status: 503})
+
+        first_retry_at = ~U[2099-01-15 12:00:00.000000Z]
+
+        assert {:ok, %{delivery: first_pending, attempt: first}} =
+                 Webhooks.schedule_delivery_retry(processing.id, failure_attrs, first_retry_at)
+
+        assert {:ok, second_processing} =
+                 Webhooks.claim_delivery(first_pending.id, 2, first_retry_at)
+
+        second_retry_at = DateTime.add(first_retry_at, 10, :second)
+
+        second_attrs =
+          Map.merge(failure_attrs, %{
+            started_at: first_retry_at,
+            completed_at: DateTime.add(first_retry_at, 1, :second)
+          })
+
+        assert {:ok, %{delivery: second_pending, attempt: second}} =
+                 Webhooks.schedule_delivery_retry(
+                   second_processing.id,
+                   second_attrs,
+                   second_retry_at
+                 )
+
+        assert {:ok, third_processing} =
+                 Webhooks.claim_delivery(second_pending.id, 3, second_retry_at)
+
+        success_attrs =
+          Map.merge(valid_attempt_attrs(), %{
+            started_at: second_retry_at,
+            completed_at: DateTime.add(second_retry_at, 1, :second)
+          })
+
+        assert {:ok, %{delivery: finalized, attempt: third}} =
+                 Webhooks.finalize_delivery(third_processing.id, success_attrs)
+
+        assert Enum.map([first, second, third], & &1.attempt_number) == [1, 2, 3]
+        assert Enum.map([first, second, third], & &1.retry_cycle) == [0, 0, 0]
+        assert Enum.map([first, second, third], & &1.cycle_attempt_number) == [1, 2, 3]
+        assert finalized.attempt_count == 3
+        assert finalized.cycle_attempt_count == 3
+        assert Webhooks.list_attempts(finalized) == [first, second, third]
       end)
     end
 
@@ -918,6 +978,8 @@ defmodule Tidewake.WebhooksTest do
         refute changeset.valid?
         assert "must be greater than or equal to 0" in errors_on(changeset).duration_ms
         assert Webhooks.get_delivery(processing.id) == before_retry
+        assert before_retry.attempt_count == 0
+        assert before_retry.cycle_attempt_count == 0
         assert Webhooks.list_attempts(processing) == []
         assert Repo.aggregate(Oban.Job, :count) == 0
       end)
@@ -966,6 +1028,8 @@ defmodule Tidewake.WebhooksTest do
                  Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
 
         assert Webhooks.get_delivery(processing.id) == before_retry
+        assert before_retry.attempt_count == 0
+        assert before_retry.cycle_attempt_count == 0
         assert Webhooks.list_attempts(processing) == []
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
       end)
@@ -1029,9 +1093,13 @@ defmodule Tidewake.WebhooksTest do
 
       assert finalized.status == "succeeded"
       assert finalized.attempt_count == 1
+      assert finalized.retry_cycle == 0
+      assert finalized.cycle_attempt_count == 1
       assert finalized.completed_at == attrs.completed_at
       assert attempt.delivery_id == delivery.id
       assert attempt.attempt_number == 1
+      assert attempt.retry_cycle == 0
+      assert attempt.cycle_attempt_number == 1
       assert Webhooks.get_delivery(delivery.id) == finalized
       assert Webhooks.list_attempts(finalized) == [attempt]
     end
@@ -1049,6 +1117,7 @@ defmodule Tidewake.WebhooksTest do
 
         assert finalized.status == "failed"
         assert finalized.attempt_count == 1
+        assert finalized.cycle_attempt_count == 1
         assert finalized.completed_at == attempt.completed_at
         assert attempt.result == result
       end
@@ -1059,18 +1128,44 @@ defmodule Tidewake.WebhooksTest do
 
       {:ok, _delivery} =
         delivery
-        |> change(attempt_count: 2)
+        |> change(attempt_count: 2, cycle_attempt_count: 2)
         |> Repo.update()
 
       {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
       attrs = Map.new(valid_attempt_attrs(), fn {key, value} -> {Atom.to_string(key), value} end)
       attrs = Map.put(attrs, "attempt_number", 99)
+      attrs = Map.put(attrs, "retry_cycle", 3)
+      attrs = Map.put(attrs, "cycle_attempt_number", 6)
 
       assert {:ok, %{delivery: finalized, attempt: attempt}} =
                Webhooks.finalize_delivery(delivery.id, attrs)
 
       assert attempt.attempt_number == 3
+      assert attempt.retry_cycle == 0
+      assert attempt.cycle_attempt_number == 3
       assert finalized.attempt_count == 3
+      assert finalized.cycle_attempt_count == 3
+    end
+
+    test "numbers the first attempt of a later cycle from both persisted counters" do
+      delivery = delivery_fixture("evt_later_cycle_identity")
+
+      {:ok, _delivery} =
+        delivery
+        |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+        |> Repo.update()
+
+      assert {:ok, _claimed} = Webhooks.claim_delivery(delivery.id, 7)
+
+      assert {:ok, %{delivery: finalized, attempt: attempt}} =
+               Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
+
+      assert attempt.attempt_number == 7
+      assert attempt.retry_cycle == 1
+      assert attempt.cycle_attempt_number == 1
+      assert finalized.attempt_count == 7
+      assert finalized.retry_cycle == 1
+      assert finalized.cycle_attempt_count == 1
     end
 
     test "invalid attempts leave the delivery and attempt history unchanged" do
@@ -1083,6 +1178,8 @@ defmodule Tidewake.WebhooksTest do
 
       refute changeset.valid?
       assert Webhooks.get_delivery(delivery.id) == before
+      assert before.attempt_count == 0
+      assert before.cycle_attempt_count == 0
       assert Webhooks.list_attempts(delivery) == []
     end
 
@@ -1136,10 +1233,21 @@ defmodule Tidewake.WebhooksTest do
       attrs = valid_attempt_attrs()
 
       assert {:ok, attempt} =
-               Webhooks.create_attempt(delivery, Map.put(attrs, :delivery_id, -1))
+               Webhooks.create_attempt(
+                 delivery,
+                 attrs
+                 |> Map.put(:delivery_id, -1)
+                 |> Map.put(:retry_cycle, 3)
+                 |> Map.put(:cycle_attempt_number, 6)
+                 |> Map.put("delivery_id", -2)
+                 |> Map.put("retry_cycle", 2)
+                 |> Map.put("cycle_attempt_number", 5)
+               )
 
       assert attempt.delivery_id == delivery.id
       assert attempt.attempt_number == attrs.attempt_number
+      assert attempt.retry_cycle == 0
+      assert attempt.cycle_attempt_number == 1
       assert attempt.result == attrs.result
       assert attempt.http_status == attrs.http_status
       assert attempt.error_type == attrs.error_type
@@ -1206,6 +1314,7 @@ defmodule Tidewake.WebhooksTest do
       persisted_delivery = Webhooks.get_delivery(delivery.id)
       assert persisted_delivery.status == "pending"
       assert persisted_delivery.attempt_count == 0
+      assert persisted_delivery.cycle_attempt_count == 0
       assert persisted_delivery.updated_at == delivery.updated_at
     end
   end
