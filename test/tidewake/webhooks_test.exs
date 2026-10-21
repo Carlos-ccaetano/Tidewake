@@ -1288,7 +1288,9 @@ defmodule Tidewake.WebhooksTest do
       {:ok, delivery} = Webhooks.create_delivery(event, first_endpoint)
       {:ok, other_delivery} = Webhooks.create_delivery(event, second_endpoint)
 
-      second_attempt = attempt_fixture(delivery, %{attempt_number: 2})
+      second_attempt =
+        attempt_fixture(%{delivery | cycle_attempt_count: 1}, %{attempt_number: 2})
+
       first_attempt = attempt_fixture(delivery, %{attempt_number: 1})
       _other_attempt = attempt_fixture(other_delivery)
 
