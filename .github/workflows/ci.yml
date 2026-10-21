@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: mix deps.get --check-locked
 
+      - name: Audit Hex dependencies
+        run: mix hex.audit
+
       - name: Check for unused locked dependencies
         run: mix deps.unlock --check-unused
 
