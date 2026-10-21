@@ -13,6 +13,14 @@ defmodule Tidewake.Webhooks do
   @event_ingested [:tidewake, :webhooks, :event, :ingested]
   @event_rejected [:tidewake, :webhooks, :event, :rejected]
   @max_stale_delivery_batch_size 100
+  @attempt_identity_keys [
+    :delivery_id,
+    "delivery_id",
+    :retry_cycle,
+    "retry_cycle",
+    :cycle_attempt_number,
+    "cycle_attempt_number"
+  ]
 
   def create_event(attrs) do
     %Event{}
@@ -206,8 +214,12 @@ defmodule Tidewake.Webhooks do
     do: {:error, :invalid_arguments}
 
   def create_attempt(%Delivery{} = delivery, attrs) do
-    %Attempt{delivery_id: delivery.id}
-    |> Attempt.changeset(attrs)
+    %Attempt{
+      delivery_id: delivery.id,
+      retry_cycle: delivery.retry_cycle,
+      cycle_attempt_number: delivery.cycle_attempt_count + 1
+    }
+    |> Attempt.changeset(Map.drop(attrs, @attempt_identity_keys))
     |> Repo.insert()
   end
 
@@ -359,8 +371,15 @@ defmodule Tidewake.Webhooks do
 
   defp finalize_processing_delivery(delivery, attrs) do
     attempt_changeset =
-      %Attempt{delivery_id: delivery.id, attempt_number: delivery.attempt_count + 1}
-      |> Attempt.changeset(Map.drop(attrs, [:attempt_number, "attempt_number"]))
+      %Attempt{
+        delivery_id: delivery.id,
+        attempt_number: delivery.attempt_count + 1,
+        retry_cycle: delivery.retry_cycle,
+        cycle_attempt_number: delivery.cycle_attempt_count + 1
+      }
+      |> Attempt.changeset(
+        Map.drop(attrs, @attempt_identity_keys ++ [:attempt_number, "attempt_number"])
+      )
 
     with {:ok, attempt} <- Repo.insert(attempt_changeset),
          {:ok, finalized} <-
@@ -368,6 +387,7 @@ defmodule Tidewake.Webhooks do
            |> Delivery.changeset(%{
              status: if(attempt.result == "succeeded", do: "succeeded", else: "failed"),
              attempt_count: delivery.attempt_count + 1,
+             cycle_attempt_count: delivery.cycle_attempt_count + 1,
              completed_at: attempt.completed_at
            })
            |> Repo.update() do
@@ -384,15 +404,16 @@ defmodule Tidewake.Webhooks do
       %Attempt{
         delivery_id: delivery.id,
         attempt_number: attempt_number,
+        retry_cycle: delivery.retry_cycle,
+        cycle_attempt_number: delivery.cycle_attempt_count + 1,
         next_attempt_at: retry_at
       }
       |> Attempt.changeset(
-        Map.drop(attrs, [
-          :attempt_number,
-          "attempt_number",
-          :next_attempt_at,
-          "next_attempt_at"
-        ])
+        Map.drop(
+          attrs,
+          @attempt_identity_keys ++
+            [:attempt_number, "attempt_number", :next_attempt_at, "next_attempt_at"]
+        )
       )
 
     with {:ok, attempt} <- Repo.insert(attempt_changeset),
@@ -401,6 +422,7 @@ defmodule Tidewake.Webhooks do
            |> Delivery.changeset(%{
              status: "pending",
              attempt_count: attempt_number,
+             cycle_attempt_count: delivery.cycle_attempt_count + 1,
              next_attempt_at: retry_at,
              completed_at: nil
            })
