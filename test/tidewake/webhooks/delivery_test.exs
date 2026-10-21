@@ -1,7 +1,7 @@
 defmodule Tidewake.Webhooks.DeliveryTest do
   use Tidewake.DataCase, async: true
 
-  alias Tidewake.Webhooks.{Delivery, Endpoint, Event}
+  alias Tidewake.Webhooks.{Delivery, Endpoint, Event, ManualRetryPolicy, RetryPolicy}
 
   describe "schema" do
     test "maps event and endpoint associations" do
@@ -19,8 +19,12 @@ defmodule Tidewake.Webhooks.DeliveryTest do
 
       assert delivery.status == "pending"
       assert delivery.attempt_count == 0
+      assert delivery.retry_cycle == 0
+      assert delivery.cycle_attempt_count == 0
       assert Delivery.__schema__(:type, :status) == :string
       assert Delivery.__schema__(:type, :attempt_count) == :integer
+      assert Delivery.__schema__(:type, :retry_cycle) == :integer
+      assert Delivery.__schema__(:type, :cycle_attempt_count) == :integer
       assert Delivery.__schema__(:type, :next_attempt_at) == :utc_datetime_usec
       assert Delivery.__schema__(:type, :completed_at) == :utc_datetime_usec
       assert Delivery.__schema__(:type, :inserted_at) == :utc_datetime_usec
@@ -37,6 +41,8 @@ defmodule Tidewake.Webhooks.DeliveryTest do
       assert get_field(changeset, :endpoint_id) == 2
       assert get_field(changeset, :status) == "pending"
       assert get_field(changeset, :attempt_count) == 0
+      assert get_field(changeset, :retry_cycle) == 0
+      assert get_field(changeset, :cycle_attempt_count) == 0
     end
 
     test "does not cast association IDs from attributes" do
@@ -97,6 +103,56 @@ defmodule Tidewake.Webhooks.DeliveryTest do
       assert "is invalid" in errors_on(changeset).attempt_count
     end
 
+    test "accepts the minimum and policy maximum retry cycle" do
+      for retry_cycle <- [0, ManualRetryPolicy.max_manual_cycles()] do
+        changeset = valid_changeset(%{retry_cycle: retry_cycle})
+
+        assert changeset.valid?
+        assert get_field(changeset, :retry_cycle) == retry_cycle
+      end
+    end
+
+    test "rejects retry cycles outside the policy range" do
+      assert "must be greater than or equal to 0" in errors_on(
+               valid_changeset(%{retry_cycle: -1})
+             ).retry_cycle
+
+      too_high = ManualRetryPolicy.max_manual_cycles() + 1
+
+      assert "must be less than or equal to #{ManualRetryPolicy.max_manual_cycles()}" in errors_on(
+               valid_changeset(%{retry_cycle: too_high})
+             ).retry_cycle
+    end
+
+    test "accepts the minimum and policy maximum cycle attempt count" do
+      for cycle_attempt_count <- [0, RetryPolicy.max_attempts()] do
+        changeset = valid_changeset(%{cycle_attempt_count: cycle_attempt_count})
+
+        assert changeset.valid?
+        assert get_field(changeset, :cycle_attempt_count) == cycle_attempt_count
+      end
+    end
+
+    test "rejects cycle attempt counts outside the policy range" do
+      assert "must be greater than or equal to 0" in errors_on(
+               valid_changeset(%{cycle_attempt_count: -1})
+             ).cycle_attempt_count
+
+      too_high = RetryPolicy.max_attempts() + 1
+
+      assert "must be less than or equal to #{RetryPolicy.max_attempts()}" in errors_on(
+               valid_changeset(%{cycle_attempt_count: too_high})
+             ).cycle_attempt_count
+    end
+
+    test "requires both retry counters" do
+      changeset = valid_changeset(%{retry_cycle: nil, cycle_attempt_count: nil})
+
+      refute changeset.valid?
+      assert "can't be blank" in errors_on(changeset).retry_cycle
+      assert "can't be blank" in errors_on(changeset).cycle_attempt_count
+    end
+
     test "casts optional lifecycle timestamps without changing precision" do
       next_attempt_at = ~U[2026-09-09 03:30:00.123456Z]
       completed_at = ~U[2026-09-09 03:31:00.654321Z]
@@ -118,6 +174,20 @@ defmodule Tidewake.Webhooks.DeliveryTest do
       assert Enum.any?(changeset.constraints, fn constraint ->
                constraint.type == :unique and constraint.field == :event_id and
                  constraint.constraint == "deliveries_event_id_endpoint_id_index"
+             end)
+    end
+
+    test "declares the database check constraints for both retry counters" do
+      constraints = valid_changeset().constraints
+
+      assert Enum.any?(constraints, fn constraint ->
+               constraint.type == :check and constraint.field == :retry_cycle and
+                 constraint.constraint == "deliveries_retry_cycle_in_range"
+             end)
+
+      assert Enum.any?(constraints, fn constraint ->
+               constraint.type == :check and constraint.field == :cycle_attempt_count and
+                 constraint.constraint == "deliveries_cycle_attempt_count_in_range"
              end)
     end
   end
