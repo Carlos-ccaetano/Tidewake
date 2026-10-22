@@ -403,6 +403,65 @@ defmodule Tidewake.Webhooks.AttemptTest do
                    "delivery_attempts_delivery_id_attempt_number_index"
              end)
     end
+
+    test "declares both retry cycle check constraints" do
+      constraints = valid_changeset().constraints
+
+      assert Enum.any?(constraints, fn constraint ->
+               constraint.type == :check and constraint.field == :retry_cycle and
+                 constraint.constraint == "delivery_attempts_retry_cycle_in_range"
+             end)
+
+      assert Enum.any?(constraints, fn constraint ->
+               constraint.type == :check and constraint.field == :cycle_attempt_number and
+                 constraint.constraint == "delivery_attempts_cycle_attempt_number_in_range"
+             end)
+    end
+
+    test "declares the composite cycle identity unique constraint" do
+      assert Enum.any?(valid_changeset().constraints, fn constraint ->
+               constraint.type == :unique and constraint.field == :cycle_attempt_number and
+                 constraint.constraint == "delivery_attempts_cycle_identity_index"
+             end)
+    end
+
+    test "returns a changeset error for a duplicate cycle identity with a new lifetime number" do
+      delivery = delivery_fixture()
+      assert {:ok, first_attempt} = Webhooks.create_attempt(delivery, valid_attrs())
+
+      assert {:error, %Ecto.Changeset{} = changeset} =
+               Webhooks.create_attempt(delivery, %{valid_attrs() | attempt_number: 2})
+
+      assert "has already been used in this delivery cycle" in errors_on(changeset).cycle_attempt_number
+
+      assert Webhooks.list_attempts(delivery) == [first_attempt]
+    end
+
+    test "preserves lifetime uniqueness for a different cycle position" do
+      delivery = delivery_fixture()
+      assert {:ok, first_attempt} = Webhooks.create_attempt(delivery, valid_attrs())
+      next_cycle_position = %{delivery | cycle_attempt_count: 1}
+
+      assert {:error, %Ecto.Changeset{} = changeset} =
+               Webhooks.create_attempt(next_cycle_position, valid_attrs())
+
+      assert "has already been taken" in errors_on(changeset).delivery_id
+      assert Webhooks.list_attempts(delivery) == [first_attempt]
+    end
+
+    test "persists a distinct lifetime and cycle attempt number" do
+      delivery = delivery_fixture()
+      assert {:ok, first_attempt} = Webhooks.create_attempt(delivery, valid_attrs())
+
+      assert {:ok, second_attempt} =
+               Webhooks.create_attempt(
+                 %{delivery | cycle_attempt_count: 1},
+                 %{valid_attrs() | attempt_number: 2}
+               )
+
+      assert {second_attempt.retry_cycle, second_attempt.cycle_attempt_number} == {0, 2}
+      assert Webhooks.list_attempts(delivery) == [first_attempt, second_attempt]
+    end
   end
 
   defp valid_changeset(overrides \\ %{}) do
