@@ -72,7 +72,20 @@ defmodule Tidewake.Webhooks.Attempt do
     |> validate_next_attempt_at()
     |> validate_http_status()
     |> validate_response_metadata()
+    |> check_constraint(:retry_cycle,
+      name: :delivery_attempts_retry_cycle_in_range,
+      message: "must be between 0 and 3"
+    )
+    |> check_constraint(:cycle_attempt_number,
+      name: :delivery_attempts_cycle_attempt_number_in_range,
+      message: "must be between 1 and 6"
+    )
     |> unique_constraint([:delivery_id, :attempt_number])
+    |> unique_constraint([:delivery_id, :retry_cycle, :cycle_attempt_number],
+      name: :delivery_attempts_cycle_identity_index,
+      error_key: :cycle_attempt_number,
+      message: "has already been used in this delivery cycle"
+    )
   end
 
   defp validate_timestamp_order(changeset) do
