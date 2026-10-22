@@ -5,7 +5,7 @@
 
 ## Context
 
-[ADR 0015](0015-manual-delivery-retry.md) gives each accepted manual retry a new budget of at most six persisted attempts, but leaves the lifetime number of manual cycles out of scope. Repeated operator requests could therefore create an unbounded number of cycles, outbound attempts, and audit records despite the per-cycle limit. Manual retry is not implemented yet; the current delivery and attempt models have no cycle identity or manual-retry audit record.
+[ADR 0015](0015-manual-delivery-retry.md) gives each accepted manual retry a new budget of at most six persisted attempts, but leaves the lifetime number of manual cycles out of scope. Repeated operator requests could therefore create an unbounded number of cycles, outbound attempts, and audit records despite the per-cycle limit. Manual retry remains unimplemented. Deliveries persist `retry_cycle` and `cycle_attempt_count`, while attempts persist `retry_cycle` and `cycle_attempt_number`; database constraints bound these values, and a unique index protects each delivery's cycle attempt identity. A pure `ManualRetryPolicy` evaluates eligibility, but delivery jobs and claims do not yet carry or guard the full cycle identity. Manual-retry scheduling, audit records, project-scoped authorization, and an API remain pending.
 
 This decision sets a lifetime boundary before the manual-retry operation is implemented. All eligibility, idempotency, authorization, transactional scheduling, and immutable-history rules in ADR 0015 still apply.
 
