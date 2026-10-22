@@ -29,7 +29,7 @@ defmodule Tidewake.Webhooks.ManualRetryPolicy do
   def evaluate(%{status: status}, _endpoint_active) when status in @ineligible_statuses,
     do: {:error, :state_not_failed}
 
-  def evaluate(%{status: "failed", current_cycle: cycle}, endpoint_active)
+  def evaluate(%{status: "failed", retry_cycle: cycle}, endpoint_active)
       when is_integer(cycle) and cycle >= 0 and is_boolean(endpoint_active) do
     cond do
       not endpoint_active -> {:error, :endpoint_inactive}
