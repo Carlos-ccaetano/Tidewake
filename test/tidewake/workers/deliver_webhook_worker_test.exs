@@ -64,6 +64,59 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     end)
   end
 
+  test "builds an immediate cycle-aware job with exactly four identity arguments" do
+    changeset = DeliverWebhookWorker.new_for_delivery(123, 7, 1, 1)
+
+    assert changeset.valid?
+    job = apply_changes(changeset)
+
+    assert job.args == %{
+             "delivery_id" => 123,
+             "attempt_number" => 7,
+             "retry_cycle" => 1,
+             "cycle_attempt_number" => 1
+           }
+
+    assert job.queue == "default"
+    assert job.max_attempts == 1
+    assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
+
+    assert job.unique.keys == [
+             :delivery_id,
+             :attempt_number,
+             :retry_cycle,
+             :cycle_attempt_number
+           ]
+  end
+
+  test "builds a scheduled cycle-aware job at the requested time" do
+    scheduled_at = ~U[2099-01-15 12:00:00.123456Z]
+
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, job} =
+               DeliverWebhookWorker.new_scheduled_for_delivery(123, 7, 1, 1, scheduled_at)
+               |> Oban.insert()
+
+      assert job.args == %{
+               "delivery_id" => 123,
+               "attempt_number" => 7,
+               "retry_cycle" => 1,
+               "cycle_attempt_number" => 1
+             }
+
+      assert job.scheduled_at == scheduled_at
+      assert job.state == "scheduled"
+      assert job.max_attempts == 1
+
+      assert job.unique.keys == [
+               :delivery_id,
+               :attempt_number,
+               :retry_cycle,
+               :cycle_attempt_number
+             ]
+    end)
+  end
+
   test "rejects invalid delivery IDs" do
     for id <- [0, -1, "1", 1.0, nil] do
       assert_raise FunctionClauseError, fn ->
@@ -91,6 +144,44 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     assert_raise FunctionClauseError, fn ->
       DeliverWebhookWorker.new_scheduled_for_delivery(1, 1, non_utc)
+    end
+  end
+
+  test "rejects invalid cycle-aware job identities and scheduled times" do
+    scheduled_at = ~U[2099-01-15 12:00:00.123456Z]
+
+    for {delivery_id, attempt_number, retry_cycle, cycle_attempt_number} <- [
+          {0, 7, 1, 1},
+          {123, 0, 1, 1},
+          {123, 7, -1, 1},
+          {123, 7, 1, 0},
+          {123, 7, "1", 1},
+          {123, 7, 1, "1"}
+        ] do
+      assert_raise FunctionClauseError, fn ->
+        DeliverWebhookWorker.new_for_delivery(
+          delivery_id,
+          attempt_number,
+          retry_cycle,
+          cycle_attempt_number
+        )
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        DeliverWebhookWorker.new_scheduled_for_delivery(
+          delivery_id,
+          attempt_number,
+          retry_cycle,
+          cycle_attempt_number,
+          scheduled_at
+        )
+      end
+    end
+
+    non_utc = %{scheduled_at | utc_offset: 3_600}
+
+    assert_raise FunctionClauseError, fn ->
+      DeliverWebhookWorker.new_scheduled_for_delivery(123, 7, 1, 1, non_utc)
     end
   end
 
@@ -124,6 +215,50 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       refute second.conflict?
       refute second.id == first.id
       assert Repo.aggregate(Oban.Job, :count) == 2
+    end)
+  end
+
+  test "active equivalent cycle-aware jobs conflict on the complete identity" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      assert {:ok, first} =
+               DeliverWebhookWorker.new_for_delivery(123, 7, 1, 1)
+               |> Oban.insert()
+
+      assert {:ok, conflicting} =
+               DeliverWebhookWorker.new_for_delivery(123, 7, 1, 1)
+               |> Oban.insert()
+
+      assert conflicting.conflict?
+      assert conflicting.id == first.id
+      assert Repo.aggregate(Oban.Job, :count) == 1
+    end)
+  end
+
+  test "cycle-aware jobs with different identity fields do not conflict" do
+    Oban.Testing.with_testing_mode(:manual, fn ->
+      jobs =
+        for {delivery_id, attempt_number, retry_cycle, cycle_attempt_number} <- [
+              {123, 7, 1, 1},
+              {124, 7, 1, 1},
+              {123, 8, 1, 1},
+              {123, 7, 2, 1},
+              {123, 7, 1, 2}
+            ] do
+          assert {:ok, job} =
+                   DeliverWebhookWorker.new_for_delivery(
+                     delivery_id,
+                     attempt_number,
+                     retry_cycle,
+                     cycle_attempt_number
+                   )
+                   |> Oban.insert()
+
+          refute job.conflict?
+          job
+        end
+
+      assert length(Enum.uniq_by(jobs, & &1.id)) == 5
+      assert Repo.aggregate(Oban.Job, :count) == 5
     end)
   end
 
@@ -184,6 +319,44 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert attempt.attempt_number == 1
   end
 
+  test "executes a cycle-aware job through the processor and persists its identity" do
+    configure_delivery_adapter(__MODULE__)
+
+    delivery =
+      delivery_fixture()
+      |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+      |> Repo.update!()
+
+    Oban.Testing.with_testing_mode(:inline, fn ->
+      assert {:ok, job} =
+               DeliverWebhookWorker.new_for_delivery(delivery.id, 7, 1, 1)
+               |> Oban.insert()
+
+      assert job.state == "completed"
+      assert job.attempt == 1
+      assert job.max_attempts == 1
+
+      assert job.args == %{
+               "delivery_id" => delivery.id,
+               "attempt_number" => 7,
+               "retry_cycle" => 1,
+               "cycle_attempt_number" => 1
+             }
+    end)
+
+    assert_received {:delivered, _, _, _}
+    finalized = Webhooks.get_delivery(delivery.id)
+    assert finalized.status == "succeeded"
+    assert finalized.attempt_count == 7
+    assert finalized.retry_cycle == 1
+    assert finalized.cycle_attempt_count == 1
+    assert [attempt] = Webhooks.list_attempts(delivery)
+    assert attempt.attempt_number == 7
+    assert attempt.retry_cycle == 1
+    assert attempt.cycle_attempt_number == 1
+    assert attempt.result == "succeeded"
+  end
+
   test "passes the logical attempt number to the processor" do
     configure_delivery_adapter(__MODULE__)
     delivery = delivery_fixture()
@@ -226,6 +399,34 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert Webhooks.list_attempts(delivery) == []
   end
 
+  for {label, attempt_number, retry_cycle, cycle_attempt_number} <- [
+        {"lifetime attempt", 6, 1, 1},
+        {"retry cycle", 7, 0, 1},
+        {"cycle ordinal", 7, 1, 2}
+      ] do
+    test "cancels a stale cycle-aware #{label} before calling the adapter" do
+      configure_delivery_adapter(__MODULE__)
+
+      delivery =
+        delivery_fixture()
+        |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+        |> Repo.update!()
+
+      assert {:cancel, :stale_attempt} =
+               perform_job(DeliverWebhookWorker, %{
+                 delivery_id: delivery.id,
+                 attempt_number: unquote(attempt_number),
+                 retry_cycle: unquote(retry_cycle),
+                 cycle_attempt_number: unquote(cycle_attempt_number)
+               })
+
+      refute_received {:delivered, _, _, _}
+      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.list_attempts(delivery) == []
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+  end
+
   test "cancels a job that runs before its persisted schedule" do
     configure_delivery_adapter(__MODULE__)
     delivery = delivery_fixture()
@@ -239,6 +440,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
              perform_job(DeliverWebhookWorker, %{
                delivery_id: delivery.id,
                attempt_number: 1
+             })
+
+    assert {:cancel, :not_due} =
+             perform_job(DeliverWebhookWorker, %{
+               delivery_id: delivery.id,
+               attempt_number: 1,
+               retry_cycle: 0,
+               cycle_attempt_number: 1
              })
 
     refute_received {:delivered, _, _, _}
@@ -289,6 +498,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
              perform_job(DeliverWebhookWorker, %{
                delivery_id: 2_147_483_647,
                attempt_number: 1
+             })
+
+    assert {:cancel, :not_found} =
+             perform_job(DeliverWebhookWorker, %{
+               delivery_id: 2_147_483_647,
+               attempt_number: 1,
+               retry_cycle: 0,
+               cycle_attempt_number: 1
              })
 
     Oban.Testing.with_testing_mode(:inline, fn ->
@@ -579,6 +796,46 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
           %{delivery_id: 1, attempt_number: 1, body: "secret"}
         ] do
       assert {:cancel, :invalid_args} = perform_job(DeliverWebhookWorker, args)
+    end
+  end
+
+  test "rejects missing, extra, or invalid cycle-aware arguments before calling the adapter" do
+    configure_delivery_adapter(__MODULE__)
+    delivery = delivery_fixture()
+
+    for args <- [
+          %{delivery_id: delivery.id, attempt_number: 1, retry_cycle: 0},
+          %{delivery_id: delivery.id, attempt_number: 1, cycle_attempt_number: 1},
+          %{
+            delivery_id: delivery.id,
+            attempt_number: 1,
+            retry_cycle: 0,
+            cycle_attempt_number: 1,
+            body: "secret"
+          },
+          %{
+            delivery_id: delivery.id,
+            attempt_number: "1",
+            retry_cycle: 0,
+            cycle_attempt_number: 1
+          },
+          %{
+            delivery_id: delivery.id,
+            attempt_number: 1,
+            retry_cycle: "0",
+            cycle_attempt_number: 1
+          },
+          %{
+            delivery_id: delivery.id,
+            attempt_number: 1,
+            retry_cycle: 0,
+            cycle_attempt_number: 0
+          }
+        ] do
+      assert {:cancel, :invalid_args} = perform_job(DeliverWebhookWorker, args)
+      refute_received {:delivered, _, _, _}
+      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.list_attempts(delivery) == []
     end
   end
 
