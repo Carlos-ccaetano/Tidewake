@@ -63,7 +63,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
       duration_ms = System.monotonic_time(:millisecond) - started
       completed_at = DateTime.utc_now()
 
-      finalize(delivery.id, attempt_number, result, %{
+      finalize(delivery, result, %{
         started_at: started_at,
         completed_at: completed_at,
         duration_ms: duration_ms
@@ -74,9 +74,9 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
     end
   end
 
-  defp finalize(delivery_id, attempt_number, response, timing) do
+  defp finalize(delivery, response, timing) do
     with {:ok, attempt_attrs} <- normalize_outcome(response, timing) do
-      persist_outcome(delivery_id, attempt_number, attempt_attrs)
+      persist_outcome(delivery, attempt_attrs)
     end
   end
 
@@ -104,21 +104,23 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
 
   defp normalize_outcome(_response, _timing), do: {:error, :invalid_adapter_response}
 
-  defp persist_outcome(delivery_id, attempt_number, attempt_attrs) do
-    case RetryPolicy.classify(attempt_attrs, attempt_number) do
+  defp persist_outcome(delivery, attempt_attrs) do
+    cycle_attempt_number = delivery.cycle_attempt_count + 1
+
+    case RetryPolicy.classify(attempt_attrs, cycle_attempt_number) do
       decision when decision in [:succeeded, :permanent_failure] ->
-        Webhooks.finalize_delivery(delivery_id, attempt_attrs)
+        Webhooks.finalize_delivery(delivery.id, attempt_attrs)
 
       :exhausted ->
-        delivery_id
+        delivery.id
         |> Webhooks.finalize_delivery(attempt_attrs)
         |> emit_retry_exhausted()
 
       :retry ->
-        with {:ok, delay_seconds} <- RetryBackoff.delay_seconds(attempt_number) do
+        with {:ok, delay_seconds} <- RetryBackoff.delay_seconds(cycle_attempt_number) do
           retry_at = DateTime.add(attempt_attrs.completed_at, delay_seconds, :second)
 
-          delivery_id
+          delivery.id
           |> Webhooks.schedule_delivery_retry(attempt_attrs, retry_at)
           |> emit_retry_scheduled()
         end

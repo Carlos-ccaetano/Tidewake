@@ -11,36 +11,40 @@ defmodule Tidewake.Webhooks.RetryPolicy do
 
   @type decision :: :succeeded | :retry | :permanent_failure | :exhausted
 
-  @doc "Returns the maximum number of persisted attempts for one delivery."
+  @doc "Returns the maximum number of persisted attempts per retry cycle."
   @spec max_attempts() :: pos_integer()
   def max_attempts, do: @max_attempts
 
   @doc """
-  Classifies a normalized delivery outcome for a positive attempt number.
+  Classifies a normalized delivery outcome for a positive attempt number within
+  the current retry cycle.
 
   Retryable outcomes become exhausted at the configured attempt limit. All
   unknown, incomplete, or otherwise invalid inputs are permanent failures.
   """
   @spec classify(map(), pos_integer()) :: decision()
-  def classify(%{result: "succeeded", http_status: status}, attempt_number)
-      when status in 200..299 and is_integer(attempt_number) and attempt_number > 0 do
+  def classify(%{result: "succeeded", http_status: status}, cycle_attempt_number)
+      when status in 200..299 and is_integer(cycle_attempt_number) and
+             cycle_attempt_number > 0 do
     :succeeded
   end
 
-  def classify(%{result: "http_error", http_status: status}, attempt_number)
-      when status in @retryable_http_statuses and is_integer(attempt_number) and
-             attempt_number > 0 do
-    retry_decision(attempt_number)
+  def classify(%{result: "http_error", http_status: status}, cycle_attempt_number)
+      when status in @retryable_http_statuses and is_integer(cycle_attempt_number) and
+             cycle_attempt_number > 0 do
+    retry_decision(cycle_attempt_number)
   end
 
-  def classify(%{result: "transport_error", error_type: error_type}, attempt_number)
-      when error_type in @retryable_transport_errors and is_integer(attempt_number) and
-             attempt_number > 0 do
-    retry_decision(attempt_number)
+  def classify(%{result: "transport_error", error_type: error_type}, cycle_attempt_number)
+      when error_type in @retryable_transport_errors and is_integer(cycle_attempt_number) and
+             cycle_attempt_number > 0 do
+    retry_decision(cycle_attempt_number)
   end
 
-  def classify(_outcome, _attempt_number), do: :permanent_failure
+  def classify(_outcome, _cycle_attempt_number), do: :permanent_failure
 
-  defp retry_decision(attempt_number) when attempt_number < @max_attempts, do: :retry
-  defp retry_decision(_attempt_number), do: :exhausted
+  defp retry_decision(cycle_attempt_number) when cycle_attempt_number < @max_attempts,
+    do: :retry
+
+  defp retry_decision(_cycle_attempt_number), do: :exhausted
 end
