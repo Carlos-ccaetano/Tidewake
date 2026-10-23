@@ -611,9 +611,13 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert_received {:delivered, _, _, _}
     assert failed.status == "failed"
     assert failed.attempt_count == 6
+    assert failed.retry_cycle == 0
+    assert failed.cycle_attempt_count == 6
     assert failed.completed_at == attempt.completed_at
     assert failed.next_attempt_at == nil
     assert attempt.attempt_number == 6
+    assert attempt.retry_cycle == 0
+    assert attempt.cycle_attempt_number == 6
     assert attempt.result == "http_error"
     assert attempt.http_status == 503
     assert attempt.next_attempt_at == nil
@@ -632,6 +636,131 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert jobs_at_emission == []
     refute_received {:retry_telemetry, @retry_exhausted, _, _, _, _, _}
     refute_received {:retry_telemetry, @retry_scheduled, _, _, _, _, _}
+  end
+
+  test "retries the first attempt of a later cycle with the first backoff interval" do
+    delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
+
+    delivery
+    |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+    |> Repo.update!()
+
+    Process.put(:adapter_response, {:ok, %{status: 503, headers: []}})
+
+    assert {:ok, %{delivery: pending, attempt: attempt, job: job}} =
+             Oban.Testing.with_testing_mode(:manual, fn ->
+               DeliveryProcessor.process(delivery.id, 7, __MODULE__)
+             end)
+
+    assert_received {:delivered, _, _, _}
+    assert pending.status == "pending"
+    assert pending.attempt_count == 7
+    assert pending.retry_cycle == 1
+    assert pending.cycle_attempt_count == 1
+    assert pending.next_attempt_at == attempt.next_attempt_at
+    assert attempt.attempt_number == 7
+    assert attempt.retry_cycle == 1
+    assert attempt.cycle_attempt_number == 1
+    assert attempt.result == "http_error"
+    assert attempt.http_status == 503
+    assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 8}
+    assert job.scheduled_at == attempt.next_attempt_at
+    assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+    assert Webhooks.get_delivery(delivery.id) == pending
+    assert Webhooks.list_attempts(delivery) == [attempt]
+
+    delay_ms = DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
+
+    assert_received {:retry_telemetry, @retry_scheduled, %{count: 1, delay_ms: ^delay_ms},
+                     %{cause: "http_503"}, ^pending, [^attempt], [job_at_emission]}
+
+    assert job_at_emission.id == job.id
+    refute_received {:retry_telemetry, @retry_exhausted, _, _, _, _, _}
+  end
+
+  test "exhausts the sixth attempt of a later cycle without scheduling a seventh" do
+    delivery = delivery_fixture()
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    attach_retry_telemetry(@retry_exhausted, delivery.id)
+
+    delivery
+    |> change(attempt_count: 11, retry_cycle: 1, cycle_attempt_count: 5)
+    |> Repo.update!()
+
+    Process.put(:adapter_response, {:ok, %{status: 503, headers: []}})
+
+    assert {:ok, %{delivery: failed, attempt: attempt} = result} =
+             DeliveryProcessor.process(delivery.id, 12, __MODULE__)
+
+    assert_received {:delivered, _, _, _}
+    assert failed.status == "failed"
+    assert failed.attempt_count == 12
+    assert failed.retry_cycle == 1
+    assert failed.cycle_attempt_count == 6
+    assert failed.next_attempt_at == nil
+    assert attempt.attempt_number == 12
+    assert attempt.retry_cycle == 1
+    assert attempt.cycle_attempt_number == 6
+    assert attempt.next_attempt_at == nil
+    refute Map.has_key?(result, :job)
+    assert Repo.aggregate(Oban.Job, :count) == 0
+
+    assert_received {:retry_telemetry, @retry_exhausted, %{count: 1}, %{cause: "http_503"},
+                     ^failed, [^attempt], []}
+
+    refute_received {:retry_telemetry, @retry_scheduled, _, _, _, _, _}
+
+    assert {:error, :invalid_transition} =
+             DeliveryProcessor.process(delivery.id, 13, __MODULE__)
+
+    refute_received {:delivered, _, _, _}
+    assert Webhooks.get_delivery(delivery.id) == failed
+    assert Webhooks.list_attempts(delivery) == [attempt]
+    assert Repo.aggregate(Oban.Job, :count) == 0
+  end
+
+  for {status, expected_status, expected_result} <- [
+        {204, "succeeded", "succeeded"},
+        {400, "failed", "http_error"}
+      ] do
+    test "keeps HTTP #{status} terminal in a later cycle" do
+      status = unquote(status)
+      expected_status = unquote(expected_status)
+      expected_result = unquote(expected_result)
+      delivery = delivery_fixture()
+      attach_telemetry(@delivery_processed)
+      attach_retry_telemetry(@retry_scheduled, delivery.id)
+      attach_retry_telemetry(@retry_exhausted, delivery.id)
+
+      delivery
+      |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+      |> Repo.update!()
+
+      Process.put(:adapter_response, {:ok, %{status: status, headers: []}})
+
+      assert {:ok, %{delivery: finalized, attempt: attempt} = result} =
+               DeliveryProcessor.process(delivery.id, 7, __MODULE__)
+
+      assert_received {:delivered, _, _, _}
+      assert finalized.status == expected_status
+      assert finalized.attempt_count == 7
+      assert finalized.cycle_attempt_count == 1
+      assert attempt.attempt_number == 7
+      assert attempt.retry_cycle == 1
+      assert attempt.cycle_attempt_number == 1
+      assert attempt.result == expected_result
+      refute Map.has_key?(result, :job)
+      assert Repo.aggregate(Oban.Job, :count) == 0
+
+      assert_received {:telemetry_event, @delivery_processed,
+                       %{count: 1, duration_ms: duration_ms}, %{outcome: ^expected_result}}
+
+      assert is_integer(duration_ms)
+      assert duration_ms >= 0
+      refute_received {:retry_telemetry, _, _, _, _, _, _}
+    end
   end
 
   for {reason, error_type, expected_status} <- [
