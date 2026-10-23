@@ -109,6 +109,11 @@ defmodule Tidewake.Webhooks do
     claim_delivery(delivery_id, expected_attempt_number, DateTime.utc_now())
   end
 
+  def claim_delivery(delivery_id, %{} = expected_identity)
+      when is_integer(delivery_id) and delivery_id > 0 do
+    claim_delivery(delivery_id, expected_identity, DateTime.utc_now())
+  end
+
   def claim_delivery(_delivery_id, _expected_attempt_number),
     do: {:error, :invalid_arguments}
 
@@ -122,10 +127,23 @@ defmodule Tidewake.Webhooks do
     claim_delivery_with_guard(delivery_id, expected_attempt_number, reference_time)
   end
 
+  def claim_delivery(
+        delivery_id,
+        %{} = expected_identity,
+        %DateTime{time_zone: "Etc/UTC", utc_offset: 0, std_offset: 0} = reference_time
+      )
+      when is_integer(delivery_id) and delivery_id > 0 do
+    if valid_claim_identity?(expected_identity) do
+      claim_delivery_with_guard(delivery_id, expected_identity, reference_time)
+    else
+      {:error, :invalid_arguments}
+    end
+  end
+
   def claim_delivery(_delivery_id, _expected_attempt_number, _reference_time),
     do: {:error, :invalid_arguments}
 
-  defp claim_delivery_with_guard(delivery_id, expected_attempt_number, reference_time) do
+  defp claim_delivery_with_guard(delivery_id, expected_attempt, reference_time) do
     Repo.transaction(fn ->
       query =
         from(delivery in Delivery,
@@ -138,7 +156,7 @@ defmodule Tidewake.Webhooks do
           Repo.rollback(:not_found)
 
         %Delivery{status: "pending"} = delivery ->
-          claim_pending_delivery(delivery, expected_attempt_number, reference_time)
+          claim_pending_delivery(delivery, expected_attempt, reference_time)
 
         %Delivery{} ->
           Repo.rollback(:invalid_transition)
@@ -470,8 +488,8 @@ defmodule Tidewake.Webhooks do
     end
   end
 
-  defp claim_pending_delivery(delivery, expected_attempt_number, reference_time) do
-    with :ok <- validate_expected_attempt(delivery, expected_attempt_number),
+  defp claim_pending_delivery(delivery, expected_attempt, reference_time) do
+    with :ok <- validate_expected_attempt(delivery, expected_attempt),
          :ok <- validate_claim_time(delivery, reference_time) do
       prepare_pending_delivery(delivery)
     else
@@ -479,7 +497,35 @@ defmodule Tidewake.Webhooks do
     end
   end
 
+  defp valid_claim_identity?(
+         %{
+           attempt_number: attempt_number,
+           retry_cycle: retry_cycle,
+           cycle_attempt_number: cycle_attempt_number
+         } = identity
+       )
+       when map_size(identity) == 3 and is_integer(attempt_number) and attempt_number > 0 and
+              is_integer(retry_cycle) and retry_cycle >= 0 and is_integer(cycle_attempt_number) and
+              cycle_attempt_number > 0,
+       do: true
+
+  defp valid_claim_identity?(_identity), do: false
+
   defp validate_expected_attempt(_delivery, :current_attempt), do: :ok
+
+  defp validate_expected_attempt(
+         delivery,
+         %{
+           attempt_number: attempt_number,
+           retry_cycle: retry_cycle,
+           cycle_attempt_number: cycle_attempt_number
+         }
+       ) do
+    if attempt_number == delivery.attempt_count + 1 and retry_cycle == delivery.retry_cycle and
+         cycle_attempt_number == delivery.cycle_attempt_count + 1,
+       do: :ok,
+       else: {:error, :stale_attempt}
+  end
 
   defp validate_expected_attempt(delivery, expected_attempt_number) do
     if expected_attempt_number == delivery.attempt_count + 1,

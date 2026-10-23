@@ -390,6 +390,17 @@ defmodule Tidewake.WebhooksTest do
       assert claimed_delivery.next_attempt_at == nil
     end
 
+    test "claim_delivery/2 accepts a complete identity using server time" do
+      delivery = delivery_fixture()
+      identity = %{attempt_number: 1, retry_cycle: 0, cycle_attempt_number: 1}
+
+      assert {:ok, claimed_delivery} = Webhooks.claim_delivery(delivery.id, identity)
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 0
+      assert claimed_delivery.retry_cycle == 0
+      assert claimed_delivery.cycle_attempt_count == 0
+    end
+
     test "claim_delivery/3 claims a retry exactly when it becomes due" do
       scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
 
@@ -426,6 +437,29 @@ defmodule Tidewake.WebhooksTest do
       assert claimed_delivery.status == "processing"
       assert claimed_delivery.attempt_count == 2
       assert claimed_delivery.next_attempt_at == nil
+    end
+
+    test "claim_delivery/3 validates the complete identity of a later cycle" do
+      reference_time = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", reference_time, %{
+          attempt_count: 6,
+          retry_cycle: 1,
+          cycle_attempt_count: 0
+        })
+
+      identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
+
+      assert {:ok, claimed_delivery} =
+               Webhooks.claim_delivery(delivery.id, identity, reference_time)
+
+      assert claimed_delivery.status == "processing"
+      assert claimed_delivery.attempt_count == 6
+      assert claimed_delivery.retry_cycle == 1
+      assert claimed_delivery.cycle_attempt_count == 0
+      assert Webhooks.list_attempts(claimed_delivery) == []
     end
 
     test "claim_delivery/3 rejects a retry one microsecond early without mutation" do
@@ -481,6 +515,55 @@ defmodule Tidewake.WebhooksTest do
       end
     end
 
+    test "claim_delivery/3 rejects mismatched lifetime or cycle identity without mutation" do
+      reference_time = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", reference_time, %{
+          attempt_count: 6,
+          retry_cycle: 1,
+          cycle_attempt_count: 0,
+          next_attempt_at: ~U[2099-01-15 12:00:00.123456Z]
+        })
+
+      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+
+      identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
+
+      for stale_identity <- [
+            %{identity | attempt_number: 6},
+            %{identity | retry_cycle: 0},
+            %{identity | cycle_attempt_number: 2}
+          ] do
+        assert {:error, :stale_attempt} =
+                 Webhooks.claim_delivery(delivery.id, stale_identity, reference_time)
+
+        assert_claim_rejected_without_mutation(delivery)
+      end
+    end
+
+    test "claim_delivery/3 keeps the due-time guard for complete identities" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+      reference_time = DateTime.add(scheduled_at, -1, :microsecond)
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", reference_time, %{
+          attempt_count: 1,
+          cycle_attempt_count: 1,
+          next_attempt_at: scheduled_at
+        })
+
+      identity = %{attempt_number: 2, retry_cycle: 0, cycle_attempt_number: 2}
+
+      assert {:error, :not_due} =
+               Webhooks.claim_delivery(delivery.id, identity, reference_time)
+
+      assert_claim_rejected_without_mutation(delivery)
+    end
+
     test "claim_delivery/3 cancels a due retry when its endpoint became inactive" do
       scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
 
@@ -515,6 +598,37 @@ defmodule Tidewake.WebhooksTest do
 
       assert {:error, :invalid_transition} =
                Webhooks.claim_delivery(delivery.id, 3, scheduled_at)
+    end
+
+    test "claim_delivery/3 cancels a due complete identity for an inactive endpoint" do
+      scheduled_at = ~U[2026-10-16 12:00:00.123456Z]
+
+      delivery =
+        delivery_fixture()
+        |> put_delivery_state("pending", scheduled_at, %{
+          attempt_count: 6,
+          retry_cycle: 1,
+          cycle_attempt_count: 0,
+          next_attempt_at: scheduled_at
+        })
+
+      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+
+      identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
+
+      assert {:cancelled, cancelled} =
+               Webhooks.claim_delivery(delivery.id, identity, scheduled_at)
+
+      assert cancelled.status == "cancelled"
+      assert cancelled.attempt_count == delivery.attempt_count
+      assert cancelled.retry_cycle == delivery.retry_cycle
+      assert cancelled.cycle_attempt_count == delivery.cycle_attempt_count
+      assert cancelled.next_attempt_at == nil
+      assert cancelled.completed_at != nil
+      refute cancelled.endpoint.active
+      assert Webhooks.get_delivery(delivery.id).status == "cancelled"
+      assert Webhooks.list_attempts(cancelled) == []
     end
 
     for status <- ~w(processing succeeded failed cancelled) do
@@ -579,6 +693,30 @@ defmodule Tidewake.WebhooksTest do
       assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 0, reference_time)
       assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 1, non_utc)
       assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, 1, nil)
+
+      identity = %{attempt_number: 1, retry_cycle: 0, cycle_attempt_number: 1}
+
+      for invalid_identity <- [
+            %{},
+            Map.delete(identity, :retry_cycle),
+            %{identity | attempt_number: 0},
+            %{identity | attempt_number: "1"},
+            %{identity | retry_cycle: -1},
+            %{identity | retry_cycle: "0"},
+            %{identity | cycle_attempt_number: 0},
+            %{identity | cycle_attempt_number: "1"},
+            Map.put(identity, :unexpected, true),
+            %{"attempt_number" => 1, "retry_cycle" => 0, "cycle_attempt_number" => 1}
+          ] do
+        assert {:error, :invalid_arguments} =
+                 Webhooks.claim_delivery(1, invalid_identity, reference_time)
+      end
+
+      assert {:error, :invalid_arguments} =
+               Webhooks.claim_delivery(1, Map.delete(identity, :retry_cycle))
+
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(0, identity, reference_time)
+      assert {:error, :invalid_arguments} = Webhooks.claim_delivery(1, identity, non_utc)
 
       refute_received :claim_query
     end
