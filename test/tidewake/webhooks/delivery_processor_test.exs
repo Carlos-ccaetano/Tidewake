@@ -763,6 +763,116 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     end
   end
 
+  test "processes a matching cycle identity and persists it on the attempt" do
+    delivery =
+      delivery_fixture()
+      |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+      |> Repo.update!()
+
+    identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
+    attach_telemetry(@delivery_processed)
+
+    assert {:ok, %{delivery: succeeded, attempt: attempt}} =
+             DeliveryProcessor.process(delivery.id, identity, __MODULE__)
+
+    assert_received {:delivered, _, _, _}
+    assert succeeded.status == "succeeded"
+    assert succeeded.attempt_count == 7
+    assert succeeded.retry_cycle == 1
+    assert succeeded.cycle_attempt_count == 1
+    assert attempt.attempt_number == 7
+    assert attempt.retry_cycle == 1
+    assert attempt.cycle_attempt_number == 1
+    assert attempt.result == "succeeded"
+    assert Webhooks.get_delivery(delivery.id) == succeeded
+    assert Webhooks.list_attempts(delivery) == [attempt]
+    assert Repo.aggregate(Oban.Job, :count) == 0
+
+    assert_received {:telemetry_event, @delivery_processed, %{count: 1, duration_ms: duration_ms},
+                     %{outcome: "succeeded"}}
+
+    assert is_integer(duration_ms) and duration_ms >= 0
+  end
+
+  test "retries a matching cycle identity with the cycle's first backoff interval" do
+    delivery =
+      delivery_fixture()
+      |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+      |> Repo.update!()
+
+    identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
+    attach_retry_telemetry(@retry_scheduled, delivery.id)
+    Process.put(:adapter_response, {:ok, %{status: 503, headers: []}})
+
+    assert {:ok, %{delivery: pending, attempt: attempt, job: job}} =
+             Oban.Testing.with_testing_mode(:manual, fn ->
+               DeliveryProcessor.process(delivery.id, identity, __MODULE__)
+             end)
+
+    assert_received {:delivered, _, _, _}
+    assert pending.status == "pending"
+    assert pending.attempt_count == 7
+    assert pending.cycle_attempt_count == 1
+    assert attempt.attempt_number == 7
+    assert attempt.retry_cycle == 1
+    assert attempt.cycle_attempt_number == 1
+    assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 8}
+    assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
+
+    delay_ms = DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
+
+    assert_received {:retry_telemetry, @retry_scheduled, %{count: 1, delay_ms: ^delay_ms},
+                     %{cause: "http_503"}, ^pending, [^attempt], [job_at_emission]}
+
+    assert job_at_emission.id == job.id
+  end
+
+  for {label, identity} <- [
+        {"lifetime attempt", %{attempt_number: 6, retry_cycle: 1, cycle_attempt_number: 1}},
+        {"retry cycle", %{attempt_number: 7, retry_cycle: 0, cycle_attempt_number: 1}},
+        {"cycle ordinal", %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 2}}
+      ] do
+    test "rejects a stale #{label} before calling the adapter" do
+      delivery =
+        delivery_fixture()
+        |> change(attempt_count: 6, retry_cycle: 1, cycle_attempt_count: 0)
+        |> Repo.update!()
+
+      identity = unquote(Macro.escape(identity))
+
+      assert {:error, :stale_attempt} =
+               DeliveryProcessor.process(delivery.id, identity, __MODULE__)
+
+      refute_received {:delivered, _, _, _}
+      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.list_attempts(delivery) == []
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+  end
+
+  for {label, identity} <- [
+        {"incomplete map", %{attempt_number: 7, retry_cycle: 1}},
+        {"invalid field type", %{attempt_number: "7", retry_cycle: 1, cycle_attempt_number: 1}},
+        {"extra field",
+         %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1, unexpected: true}},
+        {"string keys",
+         %{"attempt_number" => 7, "retry_cycle" => 1, "cycle_attempt_number" => 1}},
+        {"non-positive legacy attempt", 0}
+      ] do
+    test "rejects #{label} without claiming or persisting an attempt" do
+      delivery = delivery_fixture()
+      identity = unquote(Macro.escape(identity))
+
+      assert {:error, :invalid_arguments} =
+               DeliveryProcessor.process(delivery.id, identity, __MODULE__)
+
+      refute_received {:delivered, _, _, _}
+      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.list_attempts(delivery) == []
+      assert Repo.aggregate(Oban.Job, :count) == 0
+    end
+  end
+
   for {reason, error_type, expected_status} <- [
         {:timeout, "timeout", "pending"},
         {:dns_error, "dns", "pending"},

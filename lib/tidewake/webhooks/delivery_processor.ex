@@ -37,19 +37,35 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
     process(delivery_id, 1, adapter)
   end
 
-  def process(delivery_id, attempt_number, adapter) do
+  @doc """
+  Processes a delivery using its complete attempt identity, or a legacy lifetime
+  attempt number for jobs already in the queue.
+  """
+  def process(
+        delivery_id,
+        %{attempt_number: _, retry_cycle: _, cycle_attempt_number: _} = identity,
+        adapter
+      ) do
+    process_with_claim(delivery_id, identity, adapter)
+  end
+
+  def process(delivery_id, expected_attempt, adapter) do
+    process_with_claim(delivery_id, expected_attempt, adapter)
+  end
+
+  defp process_with_claim(delivery_id, expected_attempt, adapter) do
     started = System.monotonic_time(:millisecond)
-    result = process_delivery(delivery_id, attempt_number, adapter)
+    result = process_delivery(delivery_id, expected_attempt, adapter)
     duration_ms = System.monotonic_time(:millisecond) - started
 
     emit_processing_telemetry(result, duration_ms)
   end
 
-  defp process_delivery(delivery_id, attempt_number, adapter) do
+  defp process_delivery(delivery_id, expected_attempt, adapter) do
     with {:ok, secret} <- signing_secret(),
          reference_time = DateTime.utc_now(),
          {:ok, delivery} <-
-           Webhooks.claim_delivery(delivery_id, attempt_number, reference_time),
+           Webhooks.claim_delivery(delivery_id, expected_attempt, reference_time),
          {:ok, body} <- Envelope.encode(delivery.event),
          timestamp = System.system_time(:second),
          {:ok, signature_headers} <-
