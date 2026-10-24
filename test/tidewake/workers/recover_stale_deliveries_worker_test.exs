@@ -54,7 +54,10 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     first =
       "multiple_first"
       |> delivery_fixture()
-      |> put_processing(DateTime.add(now, -600, :second), %{attempt_count: 2})
+      |> put_processing(DateTime.add(now, -600, :second), %{
+        attempt_count: 2,
+        cycle_attempt_count: 2
+      })
 
     second =
       "multiple_second"
@@ -77,8 +80,18 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
       jobs = delivery_jobs()
 
       assert Enum.map(jobs, & &1.args) == [
-               %{"delivery_id" => first.id, "attempt_number" => 3},
-               %{"delivery_id" => second.id, "attempt_number" => 1}
+               %{
+                 "delivery_id" => first.id,
+                 "attempt_number" => 3,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 3
+               },
+               %{
+                 "delivery_id" => second.id,
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
+               }
              ]
 
       assert Enum.all?(jobs, &(&1.state == "available"))
@@ -121,7 +134,12 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
 
       assert Enum.count(
                jobs,
-               &(&1.args == %{"delivery_id" => recoverable.id, "attempt_number" => 1})
+               &(&1.args == %{
+                   "delivery_id" => recoverable.id,
+                   "attempt_number" => 1,
+                   "retry_cycle" => 0,
+                   "cycle_attempt_number" => 1
+                 })
              ) == 1
 
       assert Enum.any?(jobs, &(&1.id == active_job.id))
@@ -180,7 +198,12 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
       assert Enum.map(jobs, & &1.args) ==
                Enum.map(
                  Enum.take(deliveries, 100),
-                 &%{"delivery_id" => &1.id, "attempt_number" => 1}
+                 &%{
+                   "delivery_id" => &1.id,
+                   "attempt_number" => 1,
+                   "retry_cycle" => 0,
+                   "cycle_attempt_number" => 1
+                 }
                )
 
       assert Repo.aggregate(Attempt, :count) == 0

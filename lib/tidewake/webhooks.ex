@@ -60,7 +60,7 @@ defmodule Tidewake.Webhooks do
     Multi.new()
     |> Multi.run(:delivery, fn _repo, _changes -> create_delivery(event, endpoint) end)
     |> Oban.insert(:job, fn %{delivery: delivery} ->
-      DeliverWebhookWorker.new_for_delivery(delivery.id)
+      new_delivery_job(delivery)
     end)
     |> Repo.transaction()
   end
@@ -299,7 +299,7 @@ defmodule Tidewake.Webhooks do
       |> Oban.insert(job_operation, fn changes ->
         changes
         |> Map.fetch!(delivery_operation)
-        |> then(&DeliverWebhookWorker.new_for_delivery(&1.id))
+        |> new_delivery_job()
       end)
     end)
   end
@@ -354,6 +354,45 @@ defmodule Tidewake.Webhooks do
     Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
   end
 
+  defp new_delivery_job(delivery) do
+    DeliverWebhookWorker.new_for_delivery(
+      delivery.id,
+      delivery.attempt_count + 1,
+      delivery.retry_cycle,
+      delivery.cycle_attempt_count + 1
+    )
+  end
+
+  defp new_scheduled_delivery_job(delivery, retry_at) do
+    DeliverWebhookWorker.new_scheduled_for_delivery(
+      delivery.id,
+      delivery.attempt_count + 1,
+      delivery.retry_cycle,
+      delivery.cycle_attempt_count + 1,
+      retry_at
+    )
+  end
+
+  defp ensure_no_active_legacy_job(delivery_id, attempt_number) do
+    legacy_args = [%{"delivery_id" => delivery_id, "attempt_number" => attempt_number}]
+
+    legacy_args =
+      if attempt_number == 1,
+        do: [%{"delivery_id" => delivery_id} | legacy_args],
+        else: legacy_args
+
+    active_states = Oban.Job.unique_states(:incomplete) |> Enum.map(&Atom.to_string/1)
+    worker = Oban.Worker.to_string(DeliverWebhookWorker)
+
+    query =
+      from(job in Oban.Job,
+        where: job.worker == ^worker and job.state in ^active_states,
+        where: job.args in ^legacy_args
+      )
+
+    if Repo.exists?(query), do: {:error, :active_job}, else: :ok
+  end
+
   defp recover_if_stale(delivery, stale_before) do
     if DateTime.compare(delivery.updated_at, stale_before) in [:lt, :eq] do
       recover_processing_delivery(delivery)
@@ -363,7 +402,8 @@ defmodule Tidewake.Webhooks do
   end
 
   defp recover_processing_delivery(delivery) do
-    with {:ok, recovered} <-
+    with :ok <- ensure_no_active_legacy_job(delivery.id, delivery.attempt_count + 1),
+         {:ok, recovered} <-
            delivery
            |> Delivery.changeset(%{
              status: "pending",
@@ -371,12 +411,7 @@ defmodule Tidewake.Webhooks do
              next_attempt_at: nil
            })
            |> Repo.update(),
-         {:ok, job} <-
-           DeliverWebhookWorker.new_for_delivery(
-             delivery.id,
-             delivery.attempt_count + 1
-           )
-           |> Oban.insert() do
+         {:ok, job} <- recovered |> new_delivery_job() |> Oban.insert() do
       if job.conflict? do
         Repo.rollback(:active_job)
       else
@@ -434,7 +469,8 @@ defmodule Tidewake.Webhooks do
         )
       )
 
-    with {:ok, attempt} <- Repo.insert(attempt_changeset),
+    with :ok <- ensure_no_active_legacy_job(delivery.id, attempt_number + 1),
+         {:ok, attempt} <- Repo.insert(attempt_changeset),
          {:ok, pending} <-
            delivery
            |> Delivery.changeset(%{
@@ -445,13 +481,7 @@ defmodule Tidewake.Webhooks do
              completed_at: nil
            })
            |> Repo.update(),
-         {:ok, job} <-
-           DeliverWebhookWorker.new_scheduled_for_delivery(
-             pending.id,
-             pending.attempt_count + 1,
-             retry_at
-           )
-           |> Oban.insert() do
+         {:ok, job} <- pending |> new_scheduled_delivery_job(retry_at) |> Oban.insert() do
       if job.conflict? do
         Repo.rollback(:active_job)
       else

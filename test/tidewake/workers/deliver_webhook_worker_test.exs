@@ -572,7 +572,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert attempt.next_attempt_at == pending.next_attempt_at
 
     assert [retry_job] = all_enqueued(worker: DeliverWebhookWorker)
-    assert retry_job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+
+    assert retry_job.args == %{
+             "delivery_id" => delivery.id,
+             "attempt_number" => 2,
+             "retry_cycle" => 0,
+             "cycle_attempt_number" => 2
+           }
+
     assert retry_job.scheduled_at == pending.next_attempt_at
     assert retry_job.state == "scheduled"
     assert Tidewake.Repo.aggregate(Oban.Job, :count, :id) == 2
@@ -608,7 +615,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     assert attempt.next_attempt_at == pending.next_attempt_at
 
     assert [retry_job] = all_enqueued(worker: DeliverWebhookWorker)
-    assert retry_job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+
+    assert retry_job.args == %{
+             "delivery_id" => delivery.id,
+             "attempt_number" => 2,
+             "retry_cycle" => 0,
+             "cycle_attempt_number" => 2
+           }
+
     assert retry_job.scheduled_at == pending.next_attempt_at
     assert retry_job.state == "scheduled"
     assert Tidewake.Repo.aggregate(Oban.Job, :count, :id) == 2
@@ -645,7 +659,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert first_attempt.next_attempt_at == pending.next_attempt_at
 
       assert [second_job] = all_enqueued(worker: DeliverWebhookWorker)
-      assert second_job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+
+      assert second_job.args == %{
+               "delivery_id" => delivery.id,
+               "attempt_number" => 2,
+               "retry_cycle" => 0,
+               "cycle_attempt_number" => 2
+             }
+
       assert second_job.scheduled_at == first_attempt.next_attempt_at
       assert second_job.state == "scheduled"
       assert Repo.get!(Oban.Job, first_job.id).state == "completed"
@@ -701,7 +722,9 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
           assert successor.args == %{
                    "delivery_id" => delivery.id,
-                   "attempt_number" => attempt_number + 1
+                   "attempt_number" => attempt_number + 1,
+                   "retry_cycle" => 0,
+                   "cycle_attempt_number" => attempt_number + 1
                  }
 
           assert successor.scheduled_at == persisted.next_attempt_at

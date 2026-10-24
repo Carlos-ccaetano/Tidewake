@@ -407,7 +407,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         assert persisted.completed_at == nil
         assert persisted.next_attempt_at == attempt.next_attempt_at
         assert job.scheduled_at == attempt.next_attempt_at
-        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+
+        assert job.args == %{
+                 "delivery_id" => delivery.id,
+                 "attempt_number" => 2,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 2
+               }
+
         assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
 
         expected_cause = "http_#{status}"
@@ -665,7 +672,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert attempt.cycle_attempt_number == 1
     assert attempt.result == "http_error"
     assert attempt.http_status == 503
-    assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 8}
+
+    assert job.args == %{
+             "delivery_id" => delivery.id,
+             "attempt_number" => 8,
+             "retry_cycle" => 1,
+             "cycle_attempt_number" => 2
+           }
+
     assert job.scheduled_at == attempt.next_attempt_at
     assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
     assert Webhooks.get_delivery(delivery.id) == pending
@@ -816,7 +830,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
     assert attempt.attempt_number == 7
     assert attempt.retry_cycle == 1
     assert attempt.cycle_attempt_number == 1
-    assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 8}
+
+    assert job.args == %{
+             "delivery_id" => delivery.id,
+             "attempt_number" => 8,
+             "retry_cycle" => 1,
+             "cycle_attempt_number" => 2
+           }
+
     assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
 
     delay_ms = DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :millisecond)
@@ -926,7 +947,14 @@ defmodule Tidewake.Webhooks.DeliveryProcessorTest do
         assert persisted.completed_at == nil
         assert persisted.next_attempt_at == attempt.next_attempt_at
         assert job.scheduled_at == attempt.next_attempt_at
-        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 2}
+
+        assert job.args == %{
+                 "delivery_id" => delivery.id,
+                 "attempt_number" => 2,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 2
+               }
+
         assert DateTime.diff(attempt.next_attempt_at, attempt.completed_at, :second) in 5..10
 
         expected_cause = "transport_#{error_type}"
