@@ -74,14 +74,23 @@ defmodule Tidewake.WebhooksTest do
         assert delivery.endpoint_id == endpoint.id
         assert delivery.status == "pending"
         assert delivery.attempt_count == 0
-        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
+
+        assert job.args == %{
+                 "delivery_id" => delivery.id,
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
+               }
+
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.max_attempts == 1
         assert job.state == "available"
 
         assert Repo.get(Oban.Job, job.id).args == %{
                  "delivery_id" => delivery.id,
-                 "attempt_number" => 1
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
                }
 
         assert Webhooks.get_delivery(delivery.id) == delivery
@@ -109,7 +118,15 @@ defmodule Tidewake.WebhooksTest do
                end)
 
         assert Enum.map(jobs, & &1.args) ==
-                 Enum.map(deliveries, &%{"delivery_id" => &1.id, "attempt_number" => 1})
+                 Enum.map(
+                   deliveries,
+                   &%{
+                     "delivery_id" => &1.id,
+                     "attempt_number" => 1,
+                     "retry_cycle" => 0,
+                     "cycle_attempt_number" => 1
+                   }
+                 )
 
         assert length(deliveries) == 3
         assert length(jobs) == 3
@@ -215,14 +232,28 @@ defmodule Tidewake.WebhooksTest do
 
         assert delivery.status == "pending"
         assert delivery.attempt_count == 0
-        assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
+
+        assert job.args == %{
+                 "delivery_id" => delivery.id,
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
+               }
+
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.queue == "default"
         assert job.max_attempts == 1
         assert job.state == "available"
         assert Repo.get(Oban.Job, job.id).args == job.args
         assert Webhooks.get_delivery(delivery.id) == delivery
-        assert job.unique.keys == [:delivery_id, :attempt_number]
+
+        assert job.unique.keys == [
+                 :delivery_id,
+                 :attempt_number,
+                 :retry_cycle,
+                 :cycle_attempt_number
+               ]
+
         assert job.unique.period == :infinity
       end)
     end
@@ -745,6 +776,7 @@ defmodule Tidewake.WebhooksTest do
         processing =
           put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z], %{
             attempt_count: 3,
+            cycle_attempt_count: 3,
             completed_at: ~U[2026-09-28 11:56:00.000000Z],
             next_attempt_at: ~U[2026-09-28 12:05:00.000000Z]
           })
@@ -756,14 +788,23 @@ defmodule Tidewake.WebhooksTest do
         assert recovered.attempt_count == processing.attempt_count
         assert recovered.completed_at == nil
         assert recovered.next_attempt_at == nil
-        assert job.args == %{"delivery_id" => processing.id, "attempt_number" => 4}
+
+        assert job.args == %{
+                 "delivery_id" => processing.id,
+                 "attempt_number" => 4,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 4
+               }
+
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
         assert job.state == "available"
         refute job.conflict?
 
         assert Repo.get!(Oban.Job, job.id).args == %{
                  "delivery_id" => processing.id,
-                 "attempt_number" => 4
+                 "attempt_number" => 4,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 4
                }
 
         assert Repo.aggregate(Oban.Job, :count) == 1
@@ -782,7 +823,42 @@ defmodule Tidewake.WebhooksTest do
                  Webhooks.recover_stale_delivery(processing.id, stale_before)
 
         assert recovered.status == "pending"
-        assert job.args == %{"delivery_id" => processing.id, "attempt_number" => 1}
+
+        assert job.args == %{
+                 "delivery_id" => processing.id,
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
+               }
+      end)
+    end
+
+    test "recovers the next attempt with the current retry cycle identity" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        stale_before = ~U[2026-09-28 12:00:00.000000Z]
+        delivery = delivery_fixture()
+
+        processing =
+          put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z], %{
+            attempt_count: 6,
+            retry_cycle: 1,
+            cycle_attempt_count: 0
+          })
+
+        assert {:ok, %{delivery: recovered, job: job}} =
+                 Webhooks.recover_stale_delivery(processing.id, stale_before)
+
+        assert recovered.status == "pending"
+        assert recovered.attempt_count == 6
+        assert recovered.retry_cycle == 1
+        assert recovered.cycle_attempt_count == 0
+
+        assert job.args == %{
+                 "delivery_id" => processing.id,
+                 "attempt_number" => 7,
+                 "retry_cycle" => 1,
+                 "cycle_attempt_number" => 1
+               }
       end)
     end
 
@@ -831,13 +907,14 @@ defmodule Tidewake.WebhooksTest do
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
 
-    test "rolls back the state transition when an equivalent active job exists" do
+    test "rolls back recovery when an equivalent legacy two-key job exists" do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture()
 
         processing =
           put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z], %{
             attempt_count: 2,
+            cycle_attempt_count: 2,
             completed_at: ~U[2026-09-28 11:56:00.000000Z],
             next_attempt_at: ~U[2026-09-28 12:05:00.000000Z]
           })
@@ -858,6 +935,74 @@ defmodule Tidewake.WebhooksTest do
         assert Webhooks.get_delivery(processing.id) == processing
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
         assert Webhooks.list_attempts(processing) == []
+      end)
+    end
+
+    test "rolls back recovery when a legacy one-key initial job exists" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture()
+        processing = put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z])
+
+        assert {:ok, active_job} =
+                 DeliverWebhookWorker.new(%{"delivery_id" => processing.id})
+                 |> Oban.insert()
+
+        assert {:error, :active_job} =
+                 Webhooks.recover_stale_delivery(
+                   processing.id,
+                   ~U[2026-09-28 12:00:00.000000Z]
+                 )
+
+        assert Webhooks.get_delivery(processing.id) == processing
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
+      end)
+    end
+
+    test "rolls back recovery when an equivalent cycle-aware job exists" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture()
+        processing = put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z])
+
+        assert {:ok, active_job} =
+                 DeliverWebhookWorker.new_for_delivery(processing.id, 1, 0, 1)
+                 |> Oban.insert()
+
+        assert {:error, :active_job} =
+                 Webhooks.recover_stale_delivery(
+                   processing.id,
+                   ~U[2026-09-28 12:00:00.000000Z]
+                 )
+
+        assert Webhooks.get_delivery(processing.id) == processing
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
+      end)
+    end
+
+    test "a completed legacy job does not block recovery" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture()
+        processing = put_delivery_state(delivery, "processing", ~U[2026-09-28 11:55:00.000000Z])
+
+        assert {:ok, old_job} =
+                 DeliverWebhookWorker.new_for_delivery(processing.id, 1)
+                 |> Oban.insert()
+
+        old_job |> Changeset.change(state: "completed") |> Repo.update!()
+
+        assert {:ok, %{job: replacement}} =
+                 Webhooks.recover_stale_delivery(
+                   processing.id,
+                   ~U[2026-09-28 12:00:00.000000Z]
+                 )
+
+        assert replacement.args == %{
+                 "delivery_id" => processing.id,
+                 "attempt_number" => 1,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 1
+               }
+
+        assert Repo.aggregate(Oban.Job, :count) == 2
       end)
     end
 
@@ -1031,7 +1176,13 @@ defmodule Tidewake.WebhooksTest do
         assert pending.next_attempt_at == retry_at
         assert pending.completed_at == nil
 
-        assert job.args == %{"delivery_id" => pending.id, "attempt_number" => 2}
+        assert job.args == %{
+                 "delivery_id" => pending.id,
+                 "attempt_number" => 2,
+                 "retry_cycle" => 0,
+                 "cycle_attempt_number" => 2
+               }
+
         assert job.scheduled_at == retry_at
         assert job.state == "scheduled"
         assert job.max_attempts == 1
@@ -1147,7 +1298,7 @@ defmodule Tidewake.WebhooksTest do
       end)
     end
 
-    test "an equivalent active job rolls back the attempt and delivery update" do
+    test "an equivalent active legacy job rolls back the attempt and delivery update" do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture("evt_retry_job_conflict")
         assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
@@ -1168,6 +1319,36 @@ defmodule Tidewake.WebhooksTest do
         assert Webhooks.get_delivery(processing.id) == before_retry
         assert before_retry.attempt_count == 0
         assert before_retry.cycle_attempt_count == 0
+        assert Webhooks.list_attempts(processing) == []
+        assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
+      end)
+    end
+
+    test "an equivalent cycle-aware job rolls back the retry transaction" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        delivery = delivery_fixture("evt_cycle_retry_job_conflict")
+        assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
+        before_retry = Webhooks.get_delivery(processing.id)
+        retry_at = ~U[2099-01-15 12:00:00.248457Z]
+
+        assert {:ok, active_job} =
+                 DeliverWebhookWorker.new_scheduled_for_delivery(
+                   processing.id,
+                   2,
+                   0,
+                   2,
+                   retry_at
+                 )
+                 |> Oban.insert()
+
+        attrs =
+          valid_attempt_attrs()
+          |> Map.merge(%{result: "http_error", http_status: 503})
+
+        assert {:error, :active_job} =
+                 Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
+
+        assert Webhooks.get_delivery(processing.id) == before_retry
         assert Webhooks.list_attempts(processing) == []
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
       end)
