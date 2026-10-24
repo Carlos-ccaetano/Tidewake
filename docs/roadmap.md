@@ -88,17 +88,26 @@ Status: in progress
 Completed:
 
 - classify transient and permanent HTTP and transport outcomes through explicit allowlists that fail closed;
-- limit each delivery to six total attempts and apply exponential backoff with a 10-second base, a 300-second ceiling, and equal jitter;
-- identify jobs by `delivery_id` and logical `attempt_number`, and reject stale, duplicate, future-numbered, or early work under the delivery claim lock before sending HTTP;
+- persist the monotonic lifetime `attempt_count` and the delivery's `retry_cycle` and `cycle_attempt_count`; record each attempt's lifetime `attempt_number`, `retry_cycle`, and `cycle_attempt_number`;
+- enforce database ranges for the cycle counters and uniqueness of each attempt's delivery, cycle, and cycle ordinal;
+- define a pure manual retry eligibility policy with a limit of three manual cycles, without exposing a manual retry operation;
+- limit automatic delivery to six attempts per cycle and apply exponential backoff with a 10-second base, a 300-second ceiling, and equal jitter;
+- identify new jobs by `delivery_id`, `attempt_number`, `retry_cycle`, and `cycle_attempt_number`, while temporarily accepting legacy job formats;
+- reject stale, duplicate, future-numbered, or early work under the delivery claim lock before sending HTTP, validating the complete cycle identity for new jobs;
+- classify retry outcomes and calculate backoff from the attempt ordinal within the current cycle, while keeping lifetime attempt numbering monotonic;
 - persist the failed attempt, pending delivery state, and exactly one successor job atomically;
 - generate fresh signing material for each actual attempt, allowing Ironhold to acknowledge an identical freshly signed retry with its generic `202 Accepted` response;
-- expose bounded Telemetry for committed retry schedules and confirmed retry exhaustion without identifiers or signing material.
+- expose bounded Telemetry for committed retry schedules and confirmed retry exhaustion without identifiers or signing material;
+- cover a later retry cycle through persisted attempts, guarded claims, worker jobs, backoff, and terminal exhaustion in an integrated pipeline test.
 
 Planned:
 
-- expose manual retry with its own audit record;
+- implement a transactional manual retry command with request idempotency and an explicit audit record;
+- add administrative authorization and an authenticated operational endpoint for manual retry;
+- build the operational interface in Milestone 4;
 - support `Retry-After` without weakening the bounded retry policy;
-- define retention and payload-size policy.
+- define retention and payload-size policy, with retention jobs in Milestone 5;
+- complete production deployment and rollback work in Milestone 5.
 
 This milestone is not complete while these planned items remain open.
 
