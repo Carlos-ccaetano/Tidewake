@@ -8,6 +8,14 @@ defmodule Tidewake.Webhooks do
   alias Ecto.Multi
   alias Tidewake.Repo
   alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
+
+  alias Tidewake.Webhooks.{
+    ManualRetryActor,
+    ManualRetryIdempotency,
+    ManualRetryPolicy,
+    ManualRetryRequest
+  }
+
   alias Tidewake.Workers.DeliverWebhookWorker
 
   @event_ingested [:tidewake, :webhooks, :event, :ingested]
@@ -67,6 +75,183 @@ defmodule Tidewake.Webhooks do
 
   def get_delivery(id) do
     Repo.get(Delivery, id)
+  end
+
+  @doc """
+  Records a manual retry decision and atomically schedules an accepted retry.
+
+  This internal command requires actor context from a trusted boundary. It does
+  not authenticate or authorize access; callers must do both before invoking it,
+  including on replays. Request maps are never accepted as actor context.
+
+  The persisted request's outcome and reason are the domain decision. Replays
+  return that original record without another write. Raw keys are discarded after
+  digest preparation and never enter persistence or job arguments.
+  """
+  @spec request_manual_retry(term(), term(), term()) ::
+          {:ok, %{request: struct(), replayed?: boolean()}}
+          | {:error, atom() | Ecto.Changeset.t()}
+  def request_manual_retry(delivery_id, %ManualRetryActor{} = actor, idempotency_key)
+      when is_integer(delivery_id) and delivery_id > 0 and
+             delivery_id <= 9_223_372_036_854_775_807 do
+    with {:ok, actor} <- ManualRetryActor.new(Map.from_struct(actor)),
+         {:ok, prepared} <- ManualRetryIdempotency.prepare(delivery_id, idempotency_key) do
+      persist_manual_retry(delivery_id, actor, prepared, DateTime.utc_now())
+    else
+      {:error, :invalid_idempotency_key} -> {:error, :invalid_idempotency_key}
+      {:error, _reason} -> {:error, :invalid_arguments}
+    end
+  end
+
+  def request_manual_retry(_delivery_id, _actor, _idempotency_key),
+    do: {:error, :invalid_arguments}
+
+  defp persist_manual_retry(delivery_id, actor, prepared, requested_at) do
+    case manual_retry_transaction(delivery_id, actor, prepared, requested_at, :decide) do
+      {:error, :manual_retry_key_race} ->
+        # A different delivery lock cannot serialize this actor's key. Resolve
+        # the unique-index winner only after the losing transaction rolled back.
+        manual_retry_transaction(delivery_id, actor, prepared, requested_at, :replay_only)
+
+      result ->
+        result
+    end
+  rescue
+    _error in [
+      Postgrex.Error,
+      Ecto.ConstraintError,
+      Ecto.StaleEntryError,
+      DBConnection.ConnectionError
+    ] ->
+      {:error, :persistence_error}
+  end
+
+  defp manual_retry_transaction(delivery_id, actor, prepared, requested_at, mode) do
+    Repo.transaction(fn ->
+      delivery =
+        Repo.one(
+          from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
+        ) ||
+          Repo.rollback(:not_found)
+
+      endpoint =
+        Repo.one(
+          from(endpoint in Endpoint,
+            where: endpoint.id == ^delivery.endpoint_id,
+            lock: "FOR UPDATE"
+          )
+        ) || Repo.rollback(:persistence_error)
+
+      case prior_manual_retry(actor, prepared.idempotency_key_digest) do
+        nil when mode == :replay_only -> Repo.rollback(:persistence_error)
+        nil -> record_manual_retry(delivery, endpoint, actor, prepared, requested_at)
+        request -> replay_manual_retry(request, prepared.request_fingerprint)
+      end
+    end)
+  end
+
+  defp prior_manual_retry(actor, digest) do
+    Repo.get_by(
+      ManualRetryRequest,
+      [actor_type: actor.type, actor_subject: actor.subject, idempotency_key_digest: digest],
+      log: false,
+      telemetry_event: nil
+    )
+  end
+
+  defp replay_manual_retry(request, fingerprint) do
+    if ManualRetryIdempotency.same_fingerprint?(request.request_fingerprint, fingerprint),
+      do: %{request: request, replayed?: true},
+      else: Repo.rollback(:idempotency_conflict)
+  end
+
+  defp record_manual_retry(delivery, endpoint, actor, prepared, requested_at) do
+    decision = ManualRetryPolicy.evaluate(delivery, endpoint.active)
+    {outcome, reason, resulting_cycle} = manual_retry_decision(decision, delivery)
+
+    request = %ManualRetryRequest{
+      delivery_id: delivery.id,
+      actor_type: actor.type,
+      actor_subject: actor.subject,
+      source: actor.source,
+      idempotency_key_digest: prepared.idempotency_key_digest,
+      request_fingerprint: prepared.request_fingerprint
+    }
+
+    changeset =
+      ManualRetryRequest.changeset(request, %{
+        requested_at: requested_at,
+        outcome: outcome,
+        reason: reason,
+        observed_status: delivery.status,
+        observed_attempt_count: delivery.attempt_count,
+        observed_retry_cycle: delivery.retry_cycle,
+        observed_completed_at: delivery.completed_at,
+        resulting_retry_cycle: resulting_cycle
+      })
+
+    case Repo.insert(changeset, mode: :savepoint, log: false, telemetry_event: nil) do
+      {:ok, request} ->
+        if outcome == "accepted", do: reopen_delivery_for_manual_retry(delivery)
+        %{request: request, replayed?: false}
+
+      {:error, changeset} ->
+        if manual_retry_key_conflict?(changeset),
+          do: Repo.rollback(:manual_retry_key_race),
+          else: Repo.rollback(changeset)
+    end
+  end
+
+  defp manual_retry_decision(:ok, delivery), do: {"accepted", nil, delivery.retry_cycle + 1}
+
+  defp manual_retry_decision({:error, reason}, _delivery)
+       when reason in [:state_not_failed, :endpoint_inactive, :manual_cycle_limit_reached],
+       do: {"rejected", Atom.to_string(reason), nil}
+
+  defp manual_retry_decision(_decision, _delivery), do: Repo.rollback(:invalid_arguments)
+
+  defp manual_retry_key_conflict?(changeset) do
+    Enum.any?(changeset.errors, fn {_field, {_message, options}} ->
+      options[:constraint] == :unique and
+        options[:constraint_name] == "manual_retry_requests_actor_idempotency_key_index"
+    end)
+  end
+
+  defp reopen_delivery_for_manual_retry(delivery) do
+    with :ok <- ensure_no_active_manual_retry_legacy_job(delivery),
+         {:ok, pending} <-
+           delivery
+           |> Delivery.changeset(%{
+             status: "pending",
+             retry_cycle: delivery.retry_cycle + 1,
+             cycle_attempt_count: 0,
+             completed_at: nil,
+             next_attempt_at: nil
+           })
+           |> Repo.update(),
+         {:ok, job} <- pending |> new_delivery_job() |> Oban.insert() do
+      if job.conflict?, do: Repo.rollback(:active_job)
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp ensure_no_active_manual_retry_legacy_job(delivery) do
+    legacy_args = [
+      %{"delivery_id" => delivery.id},
+      %{"delivery_id" => delivery.id, "attempt_number" => delivery.attempt_count + 1}
+    ]
+
+    active_states = Oban.Job.unique_states(:incomplete) |> Enum.map(&Atom.to_string/1)
+    worker = Oban.Worker.to_string(DeliverWebhookWorker)
+
+    query =
+      from(job in Oban.Job,
+        where: job.worker == ^worker and job.state in ^active_states,
+        where: job.args in ^legacy_args
+      )
+
+    if Repo.exists?(query), do: {:error, :active_job}, else: :ok
   end
 
   def list_stale_delivery_ids(%DateTime{} = stale_before, limit)
