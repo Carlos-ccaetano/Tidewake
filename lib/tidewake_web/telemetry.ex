@@ -25,6 +25,11 @@ defmodule TidewakeWeb.Telemetry do
       counter("tidewake.webhooks.event.ingested.count"),
       sum("tidewake.webhooks.event.ingested.delivery_count"),
       counter("tidewake.webhooks.event.rejected.count", tags: [:reason]),
+      counter("tidewake.webhooks.manual_retry.completed.count", tags: [:outcome, :reason]),
+      summary("tidewake.webhooks.manual_retry.completed.duration_ms",
+        tags: [:outcome, :reason],
+        unit: :millisecond
+      ),
       counter("tidewake.webhooks.delivery.processed.count", tags: [:outcome]),
       summary("tidewake.webhooks.delivery.processed.duration_ms",
         tags: [:outcome],
