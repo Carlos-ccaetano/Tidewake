@@ -5,7 +5,11 @@
 
 ## Context
 
-[ADR 0015](0015-manual-delivery-retry.md) gives each accepted manual retry a new budget of at most six persisted attempts, but leaves the lifetime number of manual cycles out of scope. Repeated operator requests could therefore create an unbounded number of cycles, outbound attempts, and audit records despite the per-cycle limit. Manual retry remains unimplemented. Deliveries persist `retry_cycle` and `cycle_attempt_count`, while attempts persist `retry_cycle` and `cycle_attempt_number`; database constraints bound these values, and a unique index protects each delivery's cycle attempt identity. A pure `ManualRetryPolicy` evaluates eligibility, but delivery jobs and claims do not yet carry or guard the full cycle identity. Manual-retry scheduling, audit records, project-scoped authorization, and an API remain pending.
+[ADR 0015](0015-manual-delivery-retry.md) gives each accepted manual retry a new budget of at most six persisted attempts, but leaves the lifetime number of manual cycles out of scope. Repeated operator requests could therefore create an unbounded number of cycles, outbound attempts, and audit records despite the per-cycle limit. Manual retry remains unimplemented.
+
+Deliveries persist `attempt_count`, `retry_cycle`, and `cycle_attempt_count`; attempts persist `attempt_number`, `retry_cycle`, and `cycle_attempt_number`. Database constraints bound cycle values, and unique indexes protect lifetime and cycle attempt identities. A pure `ManualRetryPolicy` evaluates eligibility. New jobs carry `delivery_id`, `attempt_number`, `retry_cycle`, and `cycle_attempt_number`, and claims for those jobs validate the complete identity under the delivery lock. Retry classification and backoff use the cycle ordinal. An integration test covers six attempts in a later cycle while preserving lifetime history. Legacy job formats with one or two fields remain temporarily accepted.
+
+The manual-retry operation, audit record, request idempotency, project-scoped authorization, and API remain unimplemented.
 
 This decision sets a lifetime boundary before the manual-retry operation is implemented. All eligibility, idempotency, authorization, transactional scheduling, and immutable-history rules in ADR 0015 still apply.
 
