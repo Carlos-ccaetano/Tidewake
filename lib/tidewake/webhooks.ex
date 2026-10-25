@@ -20,6 +20,8 @@ defmodule Tidewake.Webhooks do
 
   @event_ingested [:tidewake, :webhooks, :event, :ingested]
   @event_rejected [:tidewake, :webhooks, :event, :rejected]
+  @manual_retry_completed [:tidewake, :webhooks, :manual_retry, :completed]
+  @manual_retry_rejection_reasons ~w(state_not_failed endpoint_inactive manual_cycle_limit_reached)
   @max_stale_delivery_batch_size 100
   @attempt_identity_keys [
     :delivery_id,
@@ -87,24 +89,82 @@ defmodule Tidewake.Webhooks do
   The persisted request's outcome and reason are the domain decision. Replays
   return that original record without another write. Raw keys are discarded after
   digest preparation and never enter persistence or job arguments.
+
+  The command must own its transaction: calls inside an explicit Repo transaction
+  return `:invalid_arguments` before domain work. This keeps completion telemetry
+  outside the transaction that commits or rolls back the decision. Each controlled
+  result emits one event with bounded outcome and reason strings; replays use
+  `"idempotent_replay"` and `"none"`. Duration is monotonic elapsed milliseconds.
   """
   @spec request_manual_retry(term(), term(), term()) ::
           {:ok, %{request: struct(), replayed?: boolean()}}
           | {:error, atom() | Ecto.Changeset.t()}
-  def request_manual_retry(delivery_id, %ManualRetryActor{} = actor, idempotency_key)
-      when is_integer(delivery_id) and delivery_id > 0 and
-             delivery_id <= 9_223_372_036_854_775_807 do
+  def request_manual_retry(delivery_id, actor, idempotency_key) do
+    started = System.monotonic_time(:millisecond)
+    result = prepare_manual_retry(delivery_id, actor, idempotency_key)
+    duration_ms = System.monotonic_time(:millisecond) - started
+
+    emit_manual_retry_telemetry(result, duration_ms)
+  end
+
+  defp prepare_manual_retry(delivery_id, %ManualRetryActor{} = actor, idempotency_key)
+       when is_integer(delivery_id) and delivery_id > 0 and
+              delivery_id <= 9_223_372_036_854_775_807 do
     with {:ok, actor} <- ManualRetryActor.new(Map.from_struct(actor)),
          {:ok, prepared} <- ManualRetryIdempotency.prepare(delivery_id, idempotency_key) do
-      persist_manual_retry(delivery_id, actor, prepared, DateTime.utc_now())
+      if Repo.in_transaction?(),
+        do: {:error, :invalid_arguments},
+        else: persist_manual_retry(delivery_id, actor, prepared, DateTime.utc_now())
     else
       {:error, :invalid_idempotency_key} -> {:error, :invalid_idempotency_key}
       {:error, _reason} -> {:error, :invalid_arguments}
     end
   end
 
-  def request_manual_retry(_delivery_id, _actor, _idempotency_key),
+  defp prepare_manual_retry(_delivery_id, _actor, _idempotency_key),
     do: {:error, :invalid_arguments}
+
+  defp emit_manual_retry_telemetry(result, duration_ms) do
+    {outcome, reason} = manual_retry_telemetry_decision(result)
+
+    :telemetry.execute(
+      @manual_retry_completed,
+      %{count: 1, duration_ms: duration_ms},
+      %{outcome: outcome, reason: reason}
+    )
+
+    result
+  end
+
+  defp manual_retry_telemetry_decision({:ok, %{replayed?: true}}),
+    do: {"idempotent_replay", "none"}
+
+  defp manual_retry_telemetry_decision(
+         {:ok, %{request: %ManualRetryRequest{outcome: "accepted"}, replayed?: false}}
+       ),
+       do: {"accepted", "none"}
+
+  defp manual_retry_telemetry_decision(
+         {:ok,
+          %{request: %ManualRetryRequest{outcome: "rejected", reason: reason}, replayed?: false}}
+       )
+       when reason in @manual_retry_rejection_reasons,
+       do: {"rejected", reason}
+
+  defp manual_retry_telemetry_decision({:error, reason}),
+    do: {"error", manual_retry_telemetry_error_reason(reason)}
+
+  defp manual_retry_telemetry_decision(_result), do: {"error", "persistence"}
+
+  defp manual_retry_telemetry_error_reason(:not_found), do: "not_found"
+  defp manual_retry_telemetry_error_reason(:invalid_arguments), do: "invalid_arguments"
+
+  defp manual_retry_telemetry_error_reason(:invalid_idempotency_key),
+    do: "invalid_idempotency_key"
+
+  defp manual_retry_telemetry_error_reason(:idempotency_conflict), do: "idempotency_conflict"
+  defp manual_retry_telemetry_error_reason(:active_job), do: "active_job"
+  defp manual_retry_telemetry_error_reason(_reason), do: "persistence"
 
   defp persist_manual_retry(delivery_id, actor, prepared, requested_at) do
     case manual_retry_transaction(delivery_id, actor, prepared, requested_at, :decide) do

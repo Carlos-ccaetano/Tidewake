@@ -8,6 +8,8 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :event, :ingested, :count],
     [:tidewake, :webhooks, :event, :ingested, :delivery_count],
     [:tidewake, :webhooks, :event, :rejected, :count],
+    [:tidewake, :webhooks, :manual_retry, :completed, :count],
+    [:tidewake, :webhooks, :manual_retry, :completed, :duration_ms],
     [:tidewake, :webhooks, :delivery, :processed, :count],
     [:tidewake, :webhooks, :delivery, :processed, :duration_ms],
     [:tidewake, :webhooks, :delivery, :cancelled, :count],
@@ -112,6 +114,23 @@ defmodule TidewakeWeb.TelemetryTest do
       assert metric.event_name == Enum.drop(metric.name, -1)
       assert metric.measurement == List.last(metric.name)
     end)
+  end
+
+  test "defines manual retry completion count and duration with only bounded tags" do
+    metrics = Telemetry.metrics()
+
+    assert %Counter{
+             event_name: [:tidewake, :webhooks, :manual_retry, :completed],
+             measurement: :count,
+             tags: [:outcome, :reason]
+           } = metric!(metrics, "tidewake.webhooks.manual_retry.completed.count")
+
+    assert %Summary{
+             event_name: [:tidewake, :webhooks, :manual_retry, :completed],
+             measurement: :duration_ms,
+             tags: [:outcome, :reason],
+             unit: :millisecond
+           } = metric!(metrics, "tidewake.webhooks.manual_retry.completed.duration_ms")
   end
 
   test "keeps the existing Phoenix, Ecto, and VM metrics" do
