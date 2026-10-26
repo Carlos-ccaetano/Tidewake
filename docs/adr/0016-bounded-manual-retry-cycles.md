@@ -3,7 +3,15 @@
 - Status: accepted
 - Date: 2026-10-21
 
+## Current implementation status
+
+The internal transactional manual retry command now enforces this cycle limit with append-only audit storage and schema, digest-only actor-scoped idempotency, and an internal actor context. Acceptance preserves lifetime attempt history and atomically commits the audit, cycle transition, and immediate job. PostgreSQL concurrency tests cover competing requests at the final cycle boundary, rollback tests protect partial-write boundaries, and completion Telemetry remains bounded and follows the command's transaction.
+
+Operational access remains pending: there is no attributable authenticated principal, project ownership, administrative authorization, retry HTTP route or controller, audit retrieval, or retry UI. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+
 ## Context
+
+The context and prospective implementation wording below describe the state when this decision was accepted.
 
 [ADR 0015](0015-manual-delivery-retry.md) gives each accepted manual retry a new budget of at most six persisted attempts, but leaves the lifetime number of manual cycles out of scope. Repeated operator requests could therefore create an unbounded number of cycles, outbound attempts, and audit records despite the per-cycle limit. Manual retry remains unimplemented.
 
