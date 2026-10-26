@@ -3,7 +3,15 @@
 - Status: accepted
 - Date: 2026-10-17
 
+## Current implementation status
+
+The internal `request_manual_retry/3` command is implemented with audit storage and schema, digest-only actor-scoped idempotency, and an internal actor context. Acceptance commits the audit record, delivery transition, and immediate cycle-aware job atomically. Concurrency and rollback tests cover the command, and bounded completion Telemetry follows its transaction. Lifetime attempt history is preserved under the three-manual-cycle limit in ADR 0016.
+
+The command remains internal. An attributable authenticated principal, project ownership, administrative authorization, a retry HTTP route or controller, audit retrieval, and a retry UI remain pending. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+
 ## Context
+
+The context and prospective implementation wording below describe the state when this decision was accepted.
 
 Tidewake owns outbound delivery and currently gives each delivery one automatic retry cycle of at most six persisted attempts. Attempt numbers are positive and unique within a delivery, `delivery.attempt_count` is the number of persisted attempts, jobs are guarded by their logical attempt number, and attempts remain append-only. A delivery becomes terminal `failed` after a permanent outcome or after the sixth retryable failure. There is no manual retry operation, audit record, API, or user interface.
 

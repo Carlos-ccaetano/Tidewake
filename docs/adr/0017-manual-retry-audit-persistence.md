@@ -3,7 +3,15 @@
 - Status: accepted
 - Date: 2026-10-25
 
+## Current implementation status
+
+The `manual_retry_requests` storage and schema, digest-only actor-scoped idempotency, internal actor context, and transactional `request_manual_retry/3` command are implemented. Accepted decisions commit with the delivery transition and immediate cycle-aware job; rejected decisions persist only their audit record, and replays perform no write. Tests cover PostgreSQL concurrency, unique-key races, rollback at each persistence boundary, confidentiality, and bounded post-transaction completion Telemetry.
+
+The command and audit remain internal. An attributable authenticated principal, project ownership, administrative authorization, a retry HTTP route or controller, audit retrieval, and a retry UI remain pending. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+
 ## Context
+
+The context and prospective implementation wording below describe the state when this decision was accepted.
 
 [ADR 0015](0015-manual-delivery-retry.md) requires an immutable record for each first-seen, authenticated and authorized manual retry request, including valid domain rejections. [ADR 0016](0016-bounded-manual-retry-cycles.md) limits a delivery to three manual cycles after its original automatic cycle, with six persisted attempts per cycle and a theoretical lifetime maximum of 24 attempts.
 

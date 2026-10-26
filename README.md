@@ -10,7 +10,11 @@ For an active delivery, the processor validates the configured signing secret be
 
 Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a configured static Bearer token.
 
-Automatic retries use explicit transient and permanent classifications, a six-attempt budget, bounded exponential backoff with equal jitter, guarded attempt-aware claims, and transactional successor scheduling. Manual retry with its own audit record, `Retry-After`, retention and payload policy, project ownership and authorization, users and token rotation, rate limiting, secret rotation, the operational LiveView, a metrics reporter, external alerts, and production deployment remain pending.
+Automatic retries use explicit transient and permanent classifications, a six-attempt budget per cycle, bounded exponential backoff with equal jitter, guarded attempt-aware claims, and transactional successor scheduling.
+
+The internal manual retry core is implemented. `Tidewake.Webhooks.request_manual_retry/3` uses audit storage and schema, digest-only actor-scoped idempotency, and an internal actor context. An accepted request atomically commits its audit record, delivery transition, and immediate cycle-aware job; a valid rejection records only its audit decision, and a replay creates no additional work. PostgreSQL locks and uniqueness arbitrate concurrent requests, rollback tests cover persistence failures and job conflicts, and bounded completion Telemetry is emitted after the command's transaction completes. Lifetime attempt history is preserved, with at most three manual cycles after the original automatic cycle.
+
+Operational manual retry access remains pending. The command is internal: there is no attributable authenticated principal, project ownership, administrative authorization, retry HTTP route or controller, audit retrieval, or retry UI. The shared Bearer token cannot supply actor identity. Delivery `Retry-After`, retention and payload policy, users and token rotation, rate limiting, secret rotation, the operational LiveView, a metrics reporter, external alerts, and production deployment also remain pending.
 
 ## Relationship with Ironhold
 
@@ -28,7 +32,8 @@ Each Tidewake attempt uses a fresh timestamp and signature. Ironhold acknowledge
 
 Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. The production adapter can deliver signed requests through the guarded Req transport when deployed and configured. Automatic retries already classify transient outcomes, apply bounded exponential backoff with equal jitter, reject stale or duplicate jobs during claim, and persist each failed attempt, pending delivery state, and successor job atomically. The broader architecture will eventually:
 
-- expose manual retry with a dedicated audit record and support `Retry-After` where appropriate;
+- expose authenticated operational manual retry access and authorized retrieval of the existing audit records;
+- support delivery `Retry-After` where appropriate;
 - define retention and payload policy and add project-scoped authorization and rate limiting;
 - expose operational history through Phoenix LiveView;
 - publish the available domain metrics through a reporter;
@@ -203,13 +208,13 @@ The `mix quality` alias runs the code checks above. The `mix precommit` alias al
     priv/repo/migrations/    Database migrations
     test/                    ExUnit tests and support
 
-Implemented endpoint, event, delivery, attempt, transactional fan-out, attempt-aware retry scheduling, stale-delivery recovery, envelope encoding, signature generation, safe target preparation, and bounded response consumption live in `Tidewake.Webhooks`. Ingestion, processing, retry scheduling and exhaustion, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
+Implemented endpoint, event, delivery, attempt, transactional fan-out, attempt-aware retry scheduling, the internal manual retry command and audit persistence, stale-delivery recovery, envelope encoding, signature generation, safe target preparation, and bounded response consumption live in `Tidewake.Webhooks`. Ingestion, processing, retry scheduling and exhaustion, internal manual retry completion, and recovery emit bounded Telemetry events, while `TidewakeWeb.Telemetry` declares the corresponding metrics without configuring a reporter. Future responsibilities may grow into focused contexts such as `Tidewake.Projects` and `Tidewake.Observability`. Those modules will be introduced only when real behavior requires them.
 
 ## Roadmap
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Outbound HTTP delivery and bounded automatic retries are implemented. The reliability milestone remains in progress while manual retry, `Retry-After`, retention and payload policy, and related hardening remain pending.
+3. Outbound HTTP delivery, bounded automatic retries, and the internal manual retry core are implemented. The reliability milestone remains in progress while attributable identity, project ownership and authorization, operational manual retry access, audit retrieval, rate limiting, delivery `Retry-After`, retention and payload policy, and related hardening remain pending.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 
