@@ -345,6 +345,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
 
     assert request.idempotency_key_digest == prepared.idempotency_key_digest
     assert request.request_fingerprint == prepared.request_fingerprint
+    assert request.request_fingerprint_version == 1
     refute inspect(result, limit: :infinity) =~ @key
 
     refute inspect(Map.from_struct(Repo.get!(ManualRetryRequest, request.id)), limit: :infinity) =~
@@ -353,6 +354,39 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     assert [job] = Repo.all(Oban.Job)
     refute inspect(job.args) =~ @key
     refute inspect(job.args) =~ actor.subject
+  end
+
+  test "internal v1 replay refuses a v2 row even when its digest bytes match", %{actor: actor} do
+    delivery = delivery_fixture()
+    assert {:ok, prepared} = ManualRetryIdempotency.prepare(delivery.id, @key)
+
+    {:ok, original} =
+      %ManualRetryRequest{
+        delivery_id: delivery.id,
+        actor_type: actor.type,
+        actor_subject: actor.subject,
+        source: actor.source,
+        idempotency_key_digest: prepared.idempotency_key_digest,
+        request_fingerprint: prepared.request_fingerprint,
+        request_fingerprint_version: 2
+      }
+      |> ManualRetryRequest.changeset(%{
+        requested_at: DateTime.utc_now(),
+        outcome: "rejected",
+        reason: "endpoint_inactive",
+        observed_status: "failed",
+        observed_attempt_count: delivery.attempt_count,
+        observed_retry_cycle: delivery.retry_cycle,
+        observed_completed_at: delivery.completed_at
+      })
+      |> Repo.insert(log: false, telemetry_event: nil)
+
+    assert {:error, :idempotency_conflict} =
+             Webhooks.request_manual_retry(delivery.id, actor, @key)
+
+    assert Repo.all(ManualRetryRequest) == [original]
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
+    assert Repo.all(Oban.Job) == []
   end
 
   for state <- ~w(available scheduled executing retryable suspended) do

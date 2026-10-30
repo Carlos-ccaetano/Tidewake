@@ -1,5 +1,5 @@
 defmodule Tidewake.Webhooks.ManualRetryIdempotencyTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog, only: [capture_log: 1]
 
@@ -8,6 +8,10 @@ defmodule Tidewake.Webhooks.ManualRetryIdempotencyTest do
   @key "0123456789abcdef"
   @alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-"
   @delivery_123_fingerprint "0457a4a758ffe5b92a5e165b0a8bc62938ca484b7fc5971ef67ad1ee6f4cea6b"
+  @project "123e4567-e89b-12d3-a456-426614174000"
+  @other_project "123e4567-e89b-12d3-a456-426614174001"
+  @v2_fingerprint "97832941ee69a5e6cfab645e824961a1be8ab7cc19f934e5e9efbb3eda955080"
+  @key_digest "9f9f5111f7b27a781f1f1ddde5ebc2dd2b796bfc7365c9c28b548e564176929f"
 
   describe "prepare/2" do
     test "accepts the inclusive 16-byte and 128-byte limits" do
@@ -127,12 +131,17 @@ defmodule Tidewake.Webhooks.ManualRetryIdempotencyTest do
       assert prepared.request_fingerprint == @delivery_123_fingerprint
     end
 
-    test "returns exactly two 64-byte lowercase hexadecimal digests and no raw key" do
+    test "returns two 64-byte digests, an explicit version and no raw key" do
       key = String.duplicate("private-key._~-", 8)
       assert {:ok, prepared} = ManualRetryIdempotency.prepare(123, key)
-      assert Enum.sort(Map.keys(prepared)) == [:idempotency_key_digest, :request_fingerprint]
 
-      for digest <- Map.values(prepared) do
+      assert Enum.sort(Map.keys(prepared)) ==
+               [:idempotency_key_digest, :request_fingerprint, :request_fingerprint_version]
+
+      assert prepared.request_fingerprint_version == 1
+
+      for digest <-
+            Map.values(Map.take(prepared, [:idempotency_key_digest, :request_fingerprint])) do
         assert byte_size(digest) == 64
         assert digest =~ ~r/\A[0-9a-f]{64}\z/
         refute digest == key
@@ -155,6 +164,187 @@ defmodule Tidewake.Webhooks.ManualRetryIdempotencyTest do
                         prepared.request_fingerprint
                       )
              end) == ""
+    end
+  end
+
+  describe "versioned preparation and replay" do
+    test "preserves independent v1 golden vectors byte for byte" do
+      # These vectors were calculated independently with Python hashlib.sha256.
+      for {id, expected} <- [
+            {1, "0fe2dcd3794dfdea5de12991a804a28827e350fa34d97f4af8dd0cf7f25aee86"},
+            {123, @delivery_123_fingerprint},
+            {9_223_372_036_854_775_807,
+             "edb37f3bf53ab011c94f255116c268fba4fc0cc511630ccecce4cd0edf6490cc"}
+          ] do
+        assert {:ok, prepared} = ManualRetryIdempotency.prepare(id, @key)
+
+        assert prepared == %{
+                 idempotency_key_digest: @key_digest,
+                 request_fingerprint: expected,
+                 request_fingerprint_version: 1
+               }
+
+        assert ManualRetryIdempotency.same_request?(prepared, prepared)
+      end
+    end
+
+    test "locks the exact project-scoped v2 bytes to independent golden vectors" do
+      for {project, id, expected} <- [
+            {@project, 123, @v2_fingerprint},
+            {@other_project, 123,
+             "f77772967ed2e626fed008740bc9067d07d478f318043761d359fc1f1fcd1154"},
+            {@project, 124, "df9e885e1ed11ce6dd64a5888fce6efdeeccbe62e94444973df30f9e0ef1ccb0"},
+            {@project, 9_223_372_036_854_775_807,
+             "cec150afce919278b0017cf130635f69db93ca4410e9098c13324d9703d138af"}
+          ] do
+        assert {:ok, prepared} = ManualRetryIdempotency.prepare(project, id, @key)
+
+        assert prepared == %{
+                 idempotency_key_digest: @key_digest,
+                 request_fingerprint: expected,
+                 request_fingerprint_version: 2
+               }
+
+        assert ManualRetryIdempotency.same_request?(prepared, prepared)
+      end
+    end
+
+    test "the same key conflicts across delivery, project and fingerprint versions" do
+      assert {:ok, original} = ManualRetryIdempotency.prepare(@project, 123, @key)
+      assert {:ok, different_key} = ManualRetryIdempotency.prepare(@project, 123, @alphabet)
+      assert ManualRetryIdempotency.same_request?(original, different_key)
+
+      for {project, id} <- [{@other_project, 123}, {@project, 124}] do
+        assert {:ok, other} = ManualRetryIdempotency.prepare(project, id, @key)
+        assert original.idempotency_key_digest == other.idempotency_key_digest
+        refute ManualRetryIdempotency.same_request?(original, other)
+        refute ManualRetryIdempotency.same_request?(other, original)
+      end
+
+      legacy = %{original | request_fingerprint_version: 1}
+      refute ManualRetryIdempotency.same_request?(legacy, original)
+      refute ManualRetryIdempotency.same_request?(original, legacy)
+    end
+
+    test "rejects unsupported stored versions and malformed records without raising" do
+      assert {:ok, prepared} = ManualRetryIdempotency.prepare(@project, 123, @key)
+
+      for version <- [nil, 0, 3, -1, 1.0, 2.0, "2", :unknown] do
+        unknown = %{prepared | request_fingerprint_version: version}
+        refute ManualRetryIdempotency.same_request?(unknown, prepared)
+        refute ManualRetryIdempotency.same_request?(prepared, unknown)
+        refute ManualRetryIdempotency.same_request?(unknown, unknown)
+      end
+
+      for malformed <- [nil, %{}, @key, %{prepared | request_fingerprint: nil}] do
+        refute ManualRetryIdempotency.same_request?(malformed, prepared)
+        refute ManualRetryIdempotency.same_request?(prepared, malformed)
+      end
+    end
+
+    test "rejects noncanonical project UUIDs instead of interpreting caller variants" do
+      for project <- [
+            nil,
+            1,
+            %{},
+            <<0::128>>,
+            String.upcase(@project),
+            String.replace(@project, "-", ""),
+            " " <> @project,
+            @project <> "\n",
+            "123e4567-e89b-12d3-a456-42661417400g"
+          ] do
+        assert ManualRetryIdempotency.prepare(project, 123, @key) ==
+                 {:error, :invalid_project_public_id}
+      end
+
+      for id <- [0, -1, nil, 1.0, "123", "00123"] do
+        assert ManualRetryIdempotency.prepare(@project, id, @key) ==
+                 {:error, :invalid_delivery_id}
+      end
+
+      assert ManualRetryIdempotency.prepare(nil, 0, nil) == {:error, :invalid_delivery_id}
+      assert ManualRetryIdempotency.prepare(nil, 123, nil) == {:error, :invalid_project_public_id}
+    end
+
+    test "v2 retains bounded key validation and exposes no raw key in results or logs" do
+      handler = "fingerprint-privacy-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :ok =
+        :telemetry.attach_many(
+          handler,
+          [[:tidewake, :repo, :query], [:tidewake, :webhooks, :manual_retry, :completed]],
+          fn event, _measurements, _metadata, _config ->
+            send(parent, {:fingerprint_event, event})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert capture_log(fn ->
+               for size <- [16, 128] do
+                 key = String.duplicate("private-key._~-", size) |> binary_part(0, size)
+                 assert {:ok, prepared} = ManualRetryIdempotency.prepare(@project, 123, key)
+                 refute String.contains?(inspect(prepared), key)
+                 refute String.contains?(inspect(prepared), @project)
+               end
+
+               for key <- [
+                     nil,
+                     "",
+                     String.duplicate("a", 15),
+                     String.duplicate("a", 129),
+                     @key <> " ",
+                     @key <> "\n",
+                     String.duplicate("é", 16)
+                   ] do
+                 assert ManualRetryIdempotency.prepare(@project, 123, key) ==
+                          {:error, :invalid_idempotency_key}
+               end
+             end) == ""
+
+      refute_received {:fingerprint_event, _event}
+    end
+
+    test "both versions delegate equal and different digests to secure_compare" do
+      supervisor = start_supervised!(Task.Supervisor)
+      Code.ensure_loaded!(Plug.Crypto)
+      :erlang.trace_pattern({Plug.Crypto, :secure_compare, 2}, true, [])
+      on_exit(fn -> :erlang.trace_pattern({Plug.Crypto, :secure_compare, 2}, false, []) end)
+
+      task =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          receive do
+            :compare ->
+              for version <- [1, 2] do
+                original = %{
+                  request_fingerprint_version: version,
+                  request_fingerprint: @v2_fingerprint
+                }
+
+                other = %{original | request_fingerprint: @delivery_123_fingerprint}
+
+                {ManualRetryIdempotency.same_request?(original, original),
+                 ManualRetryIdempotency.same_request?(original, other)}
+              end
+          end
+        end)
+
+      :erlang.trace(task.pid, true, [:call])
+      send(task.pid, :compare)
+      assert Task.await(task) == [{true, false}, {true, false}]
+      pid = task.pid
+
+      for _version <- [1, 2] do
+        assert_receive {:trace, ^pid, :call,
+                        {Plug.Crypto, :secure_compare, [@v2_fingerprint, @v2_fingerprint]}}
+
+        assert_receive {:trace, ^pid, :call,
+                        {Plug.Crypto, :secure_compare,
+                         [@v2_fingerprint, @delivery_123_fingerprint]}}
+      end
     end
   end
 

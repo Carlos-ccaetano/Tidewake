@@ -11,7 +11,8 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
     :actor_subject,
     :source,
     :idempotency_key_digest,
-    :request_fingerprint
+    :request_fingerprint,
+    :request_fingerprint_version
   ]
 
   describe "schema" do
@@ -31,6 +32,7 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
                source: :string,
                idempotency_key_digest: :string,
                request_fingerprint: :string,
+               request_fingerprint_version: :integer,
                requested_at: :utc_datetime_usec,
                outcome: :string,
                reason: :string,
@@ -138,7 +140,8 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
         actor_subject: "different-actor",
         source: "admin_cli",
         idempotency_key_digest: String.duplicate("c", 64),
-        request_fingerprint: String.duplicate("d", 64)
+        request_fingerprint: String.duplicate("d", 64),
+        request_fingerprint_version: 2
       }
 
       attrs = Map.merge(valid_attrs(), replacements)
@@ -159,6 +162,18 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
         changeset = ManualRetryRequest.changeset(request, valid_attrs())
         refute changeset.valid?
         assert Map.has_key?(errors_on(changeset), field)
+      end
+    end
+
+    test "requires an explicit supported fingerprint version from trusted identity" do
+      for version <- [1, 2] do
+        assert valid_changeset(%{}, %{request_fingerprint_version: version}).valid?
+      end
+
+      for version <- [nil, 0, 3, -1, 32_767, "unknown", %{}] do
+        changeset = valid_changeset(%{}, %{request_fingerprint_version: version})
+        refute changeset.valid?
+        assert Map.has_key?(errors_on(changeset), :request_fingerprint_version)
       end
     end
 
@@ -434,6 +449,7 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
             actor_subject: " ",
             idempotency_key_digest: String.duplicate("A", 64),
             request_fingerprint: String.duplicate("g", 64),
+            request_fingerprint_version: 3,
             observed_attempt_count: -1,
             observed_status: "unknown"
           ] do
@@ -463,7 +479,8 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
           actor_subject: "opaque-private-actor-001",
           source: "api",
           idempotency_key_digest: String.duplicate("a", 64),
-          request_fingerprint: String.duplicate("b", 64)
+          request_fingerprint: String.duplicate("b", 64),
+          request_fingerprint_version: 1
         },
         overrides
       )

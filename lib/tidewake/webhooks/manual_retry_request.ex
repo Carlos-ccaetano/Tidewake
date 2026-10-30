@@ -18,7 +18,8 @@ defmodule Tidewake.Webhooks.ManualRetryRequest do
     :actor_subject,
     :source,
     :idempotency_key_digest,
-    :request_fingerprint
+    :request_fingerprint,
+    :request_fingerprint_version
   ]
   @fields [
     :requested_at,
@@ -48,6 +49,7 @@ defmodule Tidewake.Webhooks.ManualRetryRequest do
     source: :manual_retry_requests_source_allowed,
     idempotency_key_digest: :manual_retry_requests_idempotency_key_digest_format,
     request_fingerprint: :manual_retry_requests_request_fingerprint_format,
+    request_fingerprint_version: :manual_retry_requests_request_fingerprint_version_allowed,
     outcome: :manual_retry_requests_outcome_allowed,
     reason: :manual_retry_requests_reason_allowed,
     observed_status: :manual_retry_requests_observed_status_allowed,
@@ -64,6 +66,7 @@ defmodule Tidewake.Webhooks.ManualRetryRequest do
     field :source, :string
     field :idempotency_key_digest, :string, redact: true
     field :request_fingerprint, :string, redact: true
+    field :request_fingerprint_version, :integer
     field :requested_at, :utc_datetime_usec
     field :outcome, :string
     field :reason, :string
@@ -99,6 +102,7 @@ defmodule Tidewake.Webhooks.ManualRetryRequest do
     |> validate_length(:request_fingerprint, is: 64, count: :bytes)
     |> validate_format(:idempotency_key_digest, @digest_format)
     |> validate_format(:request_fingerprint, @digest_format)
+    |> validate_inclusion(:request_fingerprint_version, [1, 2])
     |> validate_number(:observed_attempt_count, greater_than_or_equal_to: 0)
     |> validate_number(:observed_retry_cycle,
       greater_than_or_equal_to: 0,

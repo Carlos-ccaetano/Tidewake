@@ -38,7 +38,7 @@ defmodule Tidewake.Webhooks.ProjectOwnershipMigrationTest do
         seed_legacy_history()
         before = snapshot()
 
-        assert [@version] == Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+        assert [@version] == Ecto.Migrator.run(Repo, migrations, :up, to: @version, log: false)
         assert snapshot() == before
         assert_legacy_backfill()
         assert_composite_constraints()
@@ -66,7 +66,7 @@ defmodule Tidewake.Webhooks.ProjectOwnershipMigrationTest do
                    @opts
                  )
 
-        assert [@version] == Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+        assert [@version] == Ecto.Migrator.run(Repo, migrations, :up, to: @version, log: false)
         assert snapshot() == before
         assert_legacy_backfill()
         assert_composite_constraints()
