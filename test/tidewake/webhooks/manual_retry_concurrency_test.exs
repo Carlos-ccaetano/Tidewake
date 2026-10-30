@@ -1,6 +1,8 @@
 defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
   use ExUnit.Case, async: false
-  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
+
+  import Tidewake.WebhooksFixtures,
+    only: [legacy_project: 0, retry_scope_fixture: 1, retry_and_load_audit: 3]
 
   import Ecto.Query, only: [from: 2]
 
@@ -13,7 +15,6 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
     Delivery,
     Endpoint,
     Event,
-    ManualRetryActor,
     ManualRetryRequest
   }
 
@@ -37,8 +38,10 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
         end
       end)
 
+    first_actor = retry_scope_fixture(%{unboxed: true})
+    second_actor = retry_scope_fixture(%{unboxed: true})
     on_exit(fn -> cleanup_fixtures(fixtures) end)
-    {:ok, fixtures: fixtures, actor: actor()}
+    {:ok, fixtures: fixtures, actor: first_actor, second_actor: second_actor}
   end
 
   test "same delivery, actor and key converge on one accepted record and replay", %{
@@ -114,42 +117,34 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
     end)
   end
 
-  for actor_dimension <- [:type, :subject] do
-    @actor_dimension actor_dimension
-    test "different actor #{@actor_dimension} scopes independently consume the same key", %{
-      fixtures: [fixture],
-      actor: first_actor
-    } do
-      second_actor =
-        case @actor_dimension do
-          :type -> actor(first_actor.subject, "user")
-          :subject -> actor()
-        end
+  test "different authenticated accounts independently consume the same key", %{
+    fixtures: [fixture],
+    actor: first_actor,
+    second_actor: second_actor
+  } do
+    results =
+      concurrent_requests(
+        [
+          {fixture.delivery.id, first_actor, @key},
+          {fixture.delivery.id, second_actor, @key}
+        ],
+        :delivery
+      )
 
-      results =
-        concurrent_requests(
-          [
-            {fixture.delivery.id, first_actor, @key},
-            {fixture.delivery.id, second_actor, @key}
-          ],
-          :delivery
-        )
+    Sandbox.unboxed_run(Repo, fn ->
+      {accepted, rejected} = assert_two_decisions(fixture, results)
+      assert accepted.idempotency_key_digest == rejected.idempotency_key_digest
+      assert accepted.request_fingerprint == rejected.request_fingerprint
 
-      Sandbox.unboxed_run(Repo, fn ->
-        {accepted, rejected} = assert_two_decisions(fixture, results)
-        assert accepted.idempotency_key_digest == rejected.idempotency_key_digest
-        assert accepted.request_fingerprint == rejected.request_fingerprint
-
-        assert MapSet.new([
-                 {accepted.actor_type, accepted.actor_subject},
-                 {rejected.actor_type, rejected.actor_subject}
-               ]) ==
-                 MapSet.new([
-                   {first_actor.type, first_actor.subject},
-                   {second_actor.type, second_actor.subject}
-                 ])
-      end)
-    end
+      assert MapSet.new([
+               {accepted.actor_type, accepted.actor_subject},
+               {rejected.actor_type, rejected.actor_subject}
+             ]) ==
+               MapSet.new([
+                 {"service_account", first_actor.actor_subject},
+                 {"service_account", second_actor.actor_subject}
+               ])
+    end)
   end
 
   @tag retry_cycle: 2
@@ -238,7 +233,7 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
         send(parent, {barrier, :ready, self(), backend})
 
         receive do
-          {^barrier, :start} -> Webhooks.request_manual_retry(delivery_id, actor, key)
+          {^barrier, :start} -> retry_and_load_audit(actor, delivery_id, key)
         after
           @barrier_timeout -> flunk("request did not reach the start barrier")
         end
@@ -359,11 +354,6 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
         order_by: job.id
       )
     )
-  end
-
-  defp actor(subject \\ Ecto.UUID.generate(), type \\ "service_account") do
-    {:ok, actor} = ManualRetryActor.new(%{type: type, subject: subject, source: "api"})
-    actor
   end
 
   defp delivery_fixture(cycle) do

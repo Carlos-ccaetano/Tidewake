@@ -6,7 +6,7 @@ defmodule Tidewake.Webhooks do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.{Changeset, Multi}
-  alias Tidewake.Projects.{Project, Scope}
+  alias Tidewake.Projects.{Authorization, Project, Scope}
   alias Tidewake.Repo
   alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
 
@@ -91,13 +91,14 @@ defmodule Tidewake.Webhooks do
   @doc """
   Records a manual retry decision and atomically schedules an accepted retry.
 
-  This internal command requires actor context from a trusted boundary. It does
-  not authenticate or authorize access; callers must do both before invoking it,
-  including on replays. Request maps are never accepted as actor context.
+  Requires an authenticated Scope and admin permission on every call, including
+  replay. Persisted account/project authority is revalidated in the transaction
+  before locking a delivery within that project. The audit actor is derived here.
+  A Scope struct's shape alone cannot prove its authentication provenance.
 
-  The persisted request's outcome and reason are the domain decision. Replays
-  return that original record without another write. Raw keys are discarded after
-  digest preparation and never enter persistence or job arguments.
+  Returns only bounded decision fields, never the stored digests or tenant IDs.
+  Replays return the original decision without another write. New requests use
+  project-bound fingerprint version 2; historical version 1 remains unchanged.
 
   The command must own its transaction: calls inside an explicit Repo transaction
   return `:invalid_arguments` before domain work. This keeps completion telemetry
@@ -106,32 +107,45 @@ defmodule Tidewake.Webhooks do
   `"idempotent_replay"` and `"none"`. Duration is monotonic elapsed milliseconds.
   """
   @spec request_manual_retry(term(), term(), term()) ::
-          {:ok, %{request: struct(), replayed?: boolean()}}
-          | {:error, atom() | Ecto.Changeset.t()}
-  def request_manual_retry(delivery_id, actor, idempotency_key) do
-    started = System.monotonic_time(:millisecond)
-    result = prepare_manual_retry(delivery_id, actor, idempotency_key)
-    duration_ms = System.monotonic_time(:millisecond) - started
+          {:ok, %{request: map(), replayed?: boolean()}} | {:error, atom()}
+  def request_manual_retry(scope, delivery_id, idempotency_key) do
+    if Repo.in_transaction?() do
+      {:error, :invalid_arguments}
+    else
+      started = System.monotonic_time(:millisecond)
+      result = prepare_manual_retry(scope, delivery_id, idempotency_key)
+      duration_ms = System.monotonic_time(:millisecond) - started
 
-    emit_manual_retry_telemetry(result, duration_ms)
+      result |> emit_manual_retry_telemetry(duration_ms) |> public_manual_retry_result()
+    end
   end
 
-  defp prepare_manual_retry(delivery_id, %ManualRetryActor{} = actor, idempotency_key)
+  defp prepare_manual_retry(scope, delivery_id, idempotency_key) do
+    if Scope.valid?(scope) and Authorization.allowed?(scope, :manual_retries_write),
+      do: prepare_authorized_manual_retry(scope, delivery_id, idempotency_key),
+      else: {:error, :forbidden}
+  end
+
+  defp prepare_authorized_manual_retry(scope, delivery_id, idempotency_key)
        when is_integer(delivery_id) and delivery_id > 0 and
               delivery_id <= 9_223_372_036_854_775_807 do
-    with {:ok, actor} <- ManualRetryActor.new(Map.from_struct(actor)),
-         {:ok, prepared} <- ManualRetryIdempotency.prepare(delivery_id, idempotency_key) do
-      if Repo.in_transaction?(),
-        do: {:error, :invalid_arguments},
-        else: persist_manual_retry(delivery_id, actor, prepared, DateTime.utc_now())
-    else
+    case ManualRetryIdempotency.prepare(scope.project_public_id, delivery_id, idempotency_key) do
+      {:ok, prepared} -> persist_manual_retry(scope, delivery_id, prepared, DateTime.utc_now())
       {:error, :invalid_idempotency_key} -> {:error, :invalid_idempotency_key}
       {:error, _reason} -> {:error, :invalid_arguments}
     end
   end
 
-  defp prepare_manual_retry(_delivery_id, _actor, _idempotency_key),
+  defp prepare_authorized_manual_retry(_scope, _delivery_id, _idempotency_key),
     do: {:error, :invalid_arguments}
+
+  defp public_manual_retry_result({:ok, %{request: request} = result}) do
+    fields = [:id, :delivery_id, :outcome, :reason, :requested_at, :resulting_retry_cycle]
+    {:ok, %{result | request: Map.take(request, fields)}}
+  end
+
+  defp public_manual_retry_result({:error, %Changeset{}}), do: {:error, :persistence_error}
+  defp public_manual_retry_result(result), do: result
 
   defp emit_manual_retry_telemetry(result, duration_ms) do
     {outcome, reason} = manual_retry_telemetry_decision(result)
@@ -166,6 +180,7 @@ defmodule Tidewake.Webhooks do
   defp manual_retry_telemetry_decision(_result), do: {"error", "persistence"}
 
   defp manual_retry_telemetry_error_reason(:not_found), do: "not_found"
+  defp manual_retry_telemetry_error_reason(:forbidden), do: "forbidden"
   defp manual_retry_telemetry_error_reason(:invalid_arguments), do: "invalid_arguments"
 
   defp manual_retry_telemetry_error_reason(:invalid_idempotency_key),
@@ -175,12 +190,12 @@ defmodule Tidewake.Webhooks do
   defp manual_retry_telemetry_error_reason(:active_job), do: "active_job"
   defp manual_retry_telemetry_error_reason(_reason), do: "persistence"
 
-  defp persist_manual_retry(delivery_id, actor, prepared, requested_at) do
-    case manual_retry_transaction(delivery_id, actor, prepared, requested_at, :decide) do
+  defp persist_manual_retry(scope, delivery_id, prepared, requested_at) do
+    case manual_retry_transaction(scope, delivery_id, prepared, requested_at, :decide) do
       {:error, :manual_retry_key_race} ->
         # A different delivery lock cannot serialize this actor's key. Resolve
         # the unique-index winner only after the losing transaction rolled back.
-        manual_retry_transaction(delivery_id, actor, prepared, requested_at, :replay_only)
+        manual_retry_transaction(scope, delivery_id, prepared, requested_at, :replay_only)
 
       result ->
         result
@@ -195,28 +210,45 @@ defmodule Tidewake.Webhooks do
       {:error, :persistence_error}
   end
 
-  defp manual_retry_transaction(delivery_id, actor, prepared, requested_at, mode) do
-    Repo.transaction(fn ->
-      delivery =
-        Repo.one(
-          from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
-        ) ||
-          Repo.rollback(:not_found)
+  defp manual_retry_transaction(scope, delivery_id, prepared, requested_at, mode) do
+    Repo.transaction(
+      fn ->
+        if Scope.revalidate(scope) != :ok, do: Repo.rollback(:forbidden)
 
-      endpoint =
-        Repo.one(
-          from(endpoint in Endpoint,
-            where: endpoint.id == ^delivery.endpoint_id,
-            lock: "FOR UPDATE"
-          )
-        ) || Repo.rollback(:persistence_error)
+        delivery =
+          Repo.one(
+            from(delivery in Delivery,
+              where: delivery.id == ^delivery_id and delivery.project_id == ^scope.project_id,
+              lock: "FOR UPDATE"
+            ),
+            @repo_opts
+          ) ||
+            Repo.rollback(:not_found)
 
-      case prior_manual_retry(actor, prepared.idempotency_key_digest) do
-        nil when mode == :replay_only -> Repo.rollback(:persistence_error)
-        nil -> record_manual_retry(delivery, endpoint, actor, prepared, requested_at)
-        request -> replay_manual_retry(request, prepared)
-      end
-    end)
+        endpoint =
+          Repo.one(
+            from(endpoint in Endpoint,
+              where:
+                endpoint.id == ^delivery.endpoint_id and endpoint.project_id == ^scope.project_id,
+              lock: "FOR UPDATE"
+            ),
+            @repo_opts
+          ) || Repo.rollback(:persistence_error)
+
+        actor = %ManualRetryActor{
+          type: "service_account",
+          subject: scope.actor_subject,
+          source: "api"
+        }
+
+        case prior_manual_retry(actor, prepared.idempotency_key_digest) do
+          nil when mode == :replay_only -> Repo.rollback(:persistence_error)
+          nil -> record_manual_retry(delivery, endpoint, actor, prepared, requested_at)
+          request -> replay_manual_retry(request, prepared)
+        end
+      end,
+      @repo_opts
+    )
   end
 
   defp prior_manual_retry(actor, digest) do
@@ -298,8 +330,8 @@ defmodule Tidewake.Webhooks do
              completed_at: nil,
              next_attempt_at: nil
            })
-           |> Repo.update(),
-         {:ok, job} <- pending |> new_delivery_job() |> Oban.insert() do
+           |> Repo.update(@repo_opts),
+         {:ok, job} <- pending |> new_delivery_job() |> Oban.insert(@repo_opts) do
       if job.conflict?, do: Repo.rollback(:active_job)
     else
       {:error, reason} -> Repo.rollback(reason)
@@ -321,7 +353,7 @@ defmodule Tidewake.Webhooks do
         where: job.args in ^legacy_args
       )
 
-    if Repo.exists?(query), do: {:error, :active_job}, else: :ok
+    if Repo.exists?(query, @repo_opts), do: {:error, :active_job}, else: :ok
   end
 
   def list_stale_delivery_ids(%DateTime{} = stale_before, limit)

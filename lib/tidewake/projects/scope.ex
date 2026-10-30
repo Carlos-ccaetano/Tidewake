@@ -9,6 +9,10 @@ defmodule Tidewake.Projects.Scope do
   """
 
   alias Tidewake.Projects
+  alias Tidewake.Projects.ServiceAccount
+  alias Tidewake.Repo
+
+  import Ecto.Query, only: [from: 2]
 
   @enforce_keys [:service_account_id, :actor_subject, :project_id, :project_public_id, :role]
   defstruct @enforce_keys
@@ -29,6 +33,53 @@ defmodule Tidewake.Projects.Scope do
       {:ok, build(account, project)}
     end
   end
+
+  @doc "Checks Scope shape only; this cannot prove authentication provenance."
+  def valid?(
+        %__MODULE__{
+          service_account_id: account_id,
+          actor_subject: subject,
+          project_id: project_id,
+          project_public_id: public_id,
+          role: role
+        } = scope
+      )
+      when map_size(scope) == 6 and is_integer(account_id) and account_id > 0 and
+             account_id <= 9_223_372_036_854_775_807 and is_integer(project_id) and
+             project_id > 0 and project_id <= 9_223_372_036_854_775_807 and
+             role in ~w(admin producer viewer) do
+    canonical_uuid?(subject) and canonical_uuid?(public_id)
+  end
+
+  def valid?(_scope), do: false
+
+  @doc "Rechecks and share-locks persisted authority inside a sensitive command transaction."
+  def revalidate(scope) do
+    if valid?(scope) and Repo.in_transaction?() do
+      query =
+        from account in ServiceAccount,
+          join: project in assoc(account, :project),
+          where:
+            account.id == ^scope.service_account_id and account.public_id == ^scope.actor_subject,
+          where:
+            account.project_id == ^scope.project_id and
+              project.public_id == ^scope.project_public_id,
+          where:
+            account.role == ^scope.role and is_nil(account.disabled_at) and
+              project.status == "active",
+          select: account.id,
+          lock: "FOR SHARE"
+
+      if Repo.one(query, log: false, telemetry_event: nil), do: :ok, else: {:error, :forbidden}
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  defp canonical_uuid?(value) when is_binary(value) and byte_size(value) == 36,
+    do: Ecto.UUID.cast(value) == {:ok, value}
+
+  defp canonical_uuid?(_value), do: false
 
   defp build(account, project) do
     %__MODULE__{

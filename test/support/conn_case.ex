@@ -17,8 +17,6 @@ defmodule TidewakeWeb.ConnCase do
 
   use ExUnit.CaseTemplate
 
-  alias Tidewake.Projects
-
   using do
     quote do
       # The default endpoint for testing
@@ -39,17 +37,6 @@ defmodule TidewakeWeb.ConnCase do
   end
 
   def service_account_fixture(role \\ "admin", project \\ nil) do
-    {:ok, project} =
-      if project,
-        do: {:ok, project},
-        else: Projects.create_project(%{name: "API test", slug: "api-#{Ecto.UUID.generate()}"})
-
-    {:ok, account} =
-      Projects.create_service_account(project, role, %{
-        name: "Consumer #{System.unique_integer([:positive])}"
-      })
-
-    {:ok, issued} = Projects.issue_credential(account, DateTime.add(DateTime.utc_now(), 3600))
-    %{project: project, account: account, issued: issued}
+    Tidewake.ProjectsFixtures.service_account_fixture(role, project)
   end
 end
