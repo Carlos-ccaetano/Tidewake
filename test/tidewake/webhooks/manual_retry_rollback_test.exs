@@ -1,6 +1,8 @@
 defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
   use Tidewake.DataCase, async: false
-  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
+
+  import Tidewake.WebhooksFixtures,
+    only: [legacy_project: 0, retry_scope_fixture: 1, retry_and_load_audit: 3]
 
   alias Tidewake.Webhooks
 
@@ -9,7 +11,6 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
     Delivery,
     Endpoint,
     Event,
-    ManualRetryActor,
     ManualRetryRequest
   }
 
@@ -21,14 +22,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
   setup do
     Process.put(:oban_testing, :manual)
 
-    {:ok, actor} =
-      ManualRetryActor.new(%{
-        type: "service_account",
-        subject: Ecto.UUID.generate(),
-        source: "admin_cli"
-      })
-
-    {:ok, actor: actor}
+    {:ok, actor: retry_scope_fixture(%{})}
   end
 
   test "accepted audit insertion failure preserves the complete terminal delivery", %{
@@ -40,7 +34,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
 
     with_constraint("manual_retry_requests", check, fn ->
       assert {:error, :persistence_error} =
-               Webhooks.request_manual_retry(delivery.id, actor, @key)
+               retry_and_load_audit(actor, delivery.id, @key)
 
       assert_rolled_back(delivery, before_failure)
       assert Repo.all(ManualRetryRequest) == []
@@ -71,7 +65,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
       with_constraint("deliveries", check, fn ->
         # The constraint can fail only after the accepted audit is visible.
         assert {:error, :persistence_error} =
-                 Webhooks.request_manual_retry(delivery.id, actor, @key)
+                 retry_and_load_audit(actor, delivery.id, @key)
 
         assert_rolled_back(delivery, before_failure)
         assert Repo.all(ManualRetryRequest) == []
@@ -107,7 +101,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
       with_constraint("oban_jobs", check, fn ->
         # Both earlier writes must be visible before this constraint rejects work.
         assert {:error, :persistence_error} =
-                 Webhooks.request_manual_retry(delivery.id, actor, @key)
+                 retry_and_load_audit(actor, delivery.id, @key)
 
         assert_rolled_back(delivery, before_failure)
         assert Repo.all(ManualRetryRequest) == []
@@ -135,7 +129,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
     persisted_job = Repo.get!(Oban.Job, job.id)
     before_failure = snapshot()
 
-    assert {:error, :active_job} = Webhooks.request_manual_retry(delivery.id, actor, @key)
+    assert {:error, :active_job} = retry_and_load_audit(actor, delivery.id, @key)
     assert_rolled_back(delivery, before_failure)
     assert Repo.all(ManualRetryRequest) == []
     assert Repo.all(Oban.Job) == [persisted_job]
@@ -165,7 +159,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
 
       before_failure = snapshot()
 
-      assert {:error, :active_job} = Webhooks.request_manual_retry(delivery.id, actor, @key)
+      assert {:error, :active_job} = retry_and_load_audit(actor, delivery.id, @key)
       assert_rolled_back(delivery, before_failure)
       assert Repo.all(ManualRetryRequest) == []
       assert Repo.all(Oban.Job) == [job]
@@ -193,7 +187,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
 
       with_constraint("manual_retry_requests", check, fn ->
         assert {:error, :persistence_error} =
-                 Webhooks.request_manual_retry(delivery.id, actor, @key)
+                 retry_and_load_audit(actor, delivery.id, @key)
 
         assert snapshot() == before_failure
         assert Repo.all(ManualRetryRequest) == []
@@ -201,7 +195,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
       end)
 
       assert {:ok, %{request: request, replayed?: false}} =
-               Webhooks.request_manual_retry(delivery.id, actor, @key)
+               retry_and_load_audit(actor, delivery.id, @key)
 
       assert request.outcome == "rejected"
       assert request.reason == @rejection_reason
@@ -219,19 +213,19 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
          %{actor: actor} do
       first = delivery_fixture(%{endpoint_active: @original_outcome == "accepted"})
       second = delivery_fixture()
-      assert {:ok, %{request: original}} = Webhooks.request_manual_retry(first.id, actor, @key)
+      assert {:ok, %{request: original}} = retry_and_load_audit(actor, first.id, @key)
       assert original.outcome == @original_outcome
       before_failure = snapshot()
 
       assert {:error, :idempotency_conflict} =
-               Webhooks.request_manual_retry(second.id, actor, @key)
+               retry_and_load_audit(actor, second.id, @key)
 
       assert snapshot() == before_failure
       assert Repo.all(ManualRetryRequest) == [original]
       assert Webhooks.get_delivery_internal(second.id) == second
 
       assert {:ok, %{request: ^original, replayed?: true}} =
-               Webhooks.request_manual_retry(first.id, actor, @key)
+               retry_and_load_audit(actor, first.id, @key)
 
       assert snapshot() == before_failure
     end
@@ -287,7 +281,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
   defp assert_fresh_acceptance(delivery, actor) do
     # Removing the failure must allow the same key's first durable decision.
     assert {:ok, %{request: request, replayed?: false}} =
-             Webhooks.request_manual_retry(delivery.id, actor, @key)
+             retry_and_load_audit(actor, delivery.id, @key)
 
     assert request.outcome == "accepted"
     assert request.observed_retry_cycle == delivery.retry_cycle

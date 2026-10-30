@@ -5,7 +5,7 @@ defmodule Tidewake.Webhooks.ManualRetryActor do
   This structure authenticates nobody and grants no authorization. Only a trusted
   authentication boundary may construct it from server-side principal data; actor
   fields from an HTTP payload must never be passed directly to this constructor.
-  The current shared bearer token does not provide sufficient actor identity.
+  Legacy shared bearer tokens do not provide sufficient actor identity.
 
   Subjects are stable opaque identifiers, never tokens, email addresses, personal
   names, or free-form metadata. The constructor checks UTF-8 identifier shape and
@@ -14,8 +14,8 @@ defmodule Tidewake.Webhooks.ManualRetryActor do
   stability and provenance: shape validation cannot distinguish an identifier
   from a credential with the same shape.
 
-  Future manual retry commands must accept this struct, not arbitrary request
-  maps. Constructing a struct alone is not proof of authentication. None of its
+  The public retry command accepts authenticated Scope and derives this struct
+  internally. Constructing a struct alone is not proof of authentication. None of its
   values may enter Telemetry measurements, metadata, tags, or event names.
   """
 
