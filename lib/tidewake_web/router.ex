@@ -34,6 +34,18 @@ defmodule TidewakeWeb.Router do
     plug TidewakeWeb.Plugs.RequirePermission, :endpoints_write
   end
 
+  pipeline :manual_retries do
+    plug TidewakeWeb.Plugs.RequireServiceAccount
+    plug TidewakeWeb.Plugs.RequirePermission, :manual_retries_write
+  end
+
+  scope "/api", TidewakeWeb do
+    pipe_through :manual_retries
+
+    post "/deliveries/:delivery_id/manual-retry-requests", ManualRetryRequestController, :create,
+      log: false
+  end
+
   scope "/", TidewakeWeb do
     pipe_through :browser
 
