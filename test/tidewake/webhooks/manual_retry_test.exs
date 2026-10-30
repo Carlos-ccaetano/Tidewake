@@ -79,7 +79,12 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       assert job.state == "available"
       assert job.worker == Oban.Worker.to_string(DeliverWebhookWorker)
       assert job.max_attempts == 1
-      assert DateTime.compare(job.scheduled_at, DateTime.utc_now()) in [:eq, :lt]
+      # PostgreSQL supplies scheduled_at; use its clock to avoid host/DB clock skew.
+      assert Repo.exists?(
+               from(j in Oban.Job,
+                 where: j.id == ^job.id and j.scheduled_at <= fragment("clock_timestamp()")
+               )
+             )
     end
   end
 
