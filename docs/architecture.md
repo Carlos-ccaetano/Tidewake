@@ -2,13 +2,13 @@
 
 ## Status
 
-This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Static Bearer token authentication protects every route under `/api`. Atomic delivery claim with delivery-time endpoint re-evaluation, cancellation, and finalization, the adapter contract, a deterministic local adapter, single-pass JSON envelope encoding, HMAC signing of the exact encoded bytes, success and failure processing, safe response metadata extraction, bounded automatic retries, an Oban worker, atomic delivery/job scheduling, and periodic stale-delivery recovery are available.
+This document describes the current implementation and intended direction for Tidewake. Endpoint management, event ingestion and individual retrieval, and persistence for deliveries and attempts are implemented. Project-bound service-account authentication and explicit route permissions protect every `/api` route. Atomic delivery claim with delivery-time endpoint re-evaluation, cancellation, and finalization, the adapter contract, a deterministic local adapter, single-pass JSON envelope encoding, HMAC signing of the exact encoded bytes, success and failure processing, safe response metadata extraction, bounded automatic retries, an Oban worker, atomic delivery/job scheduling, and periodic stale-delivery recovery are available.
 
-`POST /api/events` now atomically persists the event, one pending delivery per active endpoint, and exactly one initial Oban job per delivery. The delivery status API exposes the resulting records, including scheduled and terminal outcomes, without endpoint configuration, payloads, or attempts. Ingestion, delivery processing, retry scheduling and exhaustion, cancellation, recovery, and internal manual retry completion emit bounded Telemetry events, and declarative counters, sums, and duration summaries are available in `TidewakeWeb.Telemetry`.
+`POST /api/events` now atomically persists the event, one pending delivery per active endpoint in its project, and exactly one initial Oban job per delivery. The delivery status API exposes the resulting records, including scheduled and terminal outcomes, without endpoint configuration, payloads, or attempts. Ingestion, delivery processing, retry scheduling and exhaustion, cancellation, recovery, and internal manual retry completion emit bounded Telemetry events, and declarative counters, sums, and duration summaries are available in `TidewakeWeb.Telemetry`.
 
-Milestone 1 is complete for the durable delivery path. The processor reads the signing secret from application configuration, serializes each envelope once per attempt, signs those exact bytes with a fresh timestamp, and prepares the three versioned signature headers. The secret, signature, and signing timestamp are not persisted. Production configures the Req adapter with the system resolver and public-only targets. Development and tests remain deterministic by default; development requires explicit flags for outbound HTTP and for local targets. Project ownership and authorization, secret rotation, `Retry-After`, public manual retry access, an operational LiveView, external alerting, a metrics reporter, and production deployment remain pending. User identities and automatic API token rotation also remain future work.
+Milestone 1 is complete for the durable delivery path. The processor reads the signing secret from application configuration, serializes each envelope once per attempt, signs those exact bytes with a fresh timestamp, and prepares the three versioned signature headers. The secret, signature, and signing timestamp are not persisted. Production configures the Req adapter with the system resolver and public-only targets. Development and tests remain deterministic by default; development requires explicit flags for outbound HTTP and for local targets. Secret rotation, `Retry-After`, public manual retry access, an operational LiveView, external alerting, a metrics reporter, and production deployment remain pending. Human identities and automatic credential rotation also remain future work.
 
-The internal manual retry command and append-only audit persistence are implemented on the cycle-aware delivery pipeline. The operation is not exposed. There is no attributable authenticated principal, administrative authorization, retry route, controller, or user interface; the current shared token cannot supply the required actor identity.
+The internal manual retry command and append-only audit persistence are implemented on the cycle-aware delivery pipeline. Existing API routes have attributable service identity, project ownership and authorization. The retry operation still has no authenticated route/controller, authorized audit retrieval or user interface.
 
 ## System boundary
 
@@ -24,22 +24,21 @@ Ironhold remains an independent system and repository. Tidewake must not depend 
 
 ## API authentication boundary
 
-Every current route under `/api` passes through `TidewakeWeb.Plugs.RequireApiToken` in the Phoenix `:api` pipeline and requires exactly one `Authorization: Bearer <token>` header. The plug authenticates callers against one configured static token; it does not identify users or authorize access by project.
+Every current `/api` route runs `RequireServiceAccount` followed by a route-configured `RequirePermission`. Authentication reloads persisted credential/account/project state and constructs only the five identity fields in `Tidewake.Projects.Scope`. Controllers pass `current_scope` to project-scoped Webhooks operations. There is no shared-token fallback or implicit legacy project selection.
 
-Development defaults to the recognizable non-production value `dev-only-api-token-not-for-production`. Production requires `TIDEWAKE_API_TOKEN` with at least 32 bytes and has no default or fallback. Real token values must stay outside source control and documentation.
+| Existing operation | Required permission |
+| --- | --- |
+| Endpoint list/show, Event show and event delivery status | `resources_read` |
+| Event ingestion | `events_write` |
+| Endpoint create/update | `endpoints_write` |
 
-Missing, malformed, duplicated, or invalid credentials are halted before controller or domain operations with `401 Unauthorized`, `WWW-Authenticate: Bearer`, and the same public JSON response:
+The pure Authorization policy grants reads to admin/producer/viewer, ingestion to admin/producer, and endpoint writes to admin. Unknown roles/actions deny. Resource queries combine the resource ID and trusted project; supplied tenancy fields cannot override ownership. Foreign and absent resources return the same 404.
 
-```json
-{
-  "error": {
-    "code": "unauthorized",
-    "message": "Valid API token required"
-  }
-}
-```
+Credentials are opaque, expiring and revocable. Missing/malformed/unknown, mismatched, expired/revoked credentials, disabled accounts and suspended projects receive the same 401 with a bare `WWW-Authenticate: Bearer` challenge. Valid identities lacking permission receive a fixed 403. Both failures halt before controller operations, use a fixed JSON envelope and `Cache-Control: no-store`, and reveal no identity or credential details.
 
-Users, sessions, OAuth, JWT, project-level authorization, multiple simultaneous tokens, and automatic token rotation remain future work. The static shared token is an initial authentication boundary, not a complete identity or authorization system.
+Production requires the dedicated `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER` from a secret manager, at least 32 random bytes with no fallback. Local dev/test values are non-production. Changing it requires explicit credential reissuance. Provision before using the API with `mix tidewake.projects.create` and `mix tidewake.service_accounts.provision`; retire credentials with `mix tidewake.service_accounts.revoke_credential`. Raw credentials print once after commit and belong in a secret manager.
+
+Human users, sessions, OAuth, JWT and automatic credential rotation remain future work. Manual retry HTTP and audit retrieval are still unexposed; the internal retry command is not yet an authenticated API boundary.
 
 ## Intended flow
 
@@ -55,7 +54,7 @@ Users, sessions, OAuth, JWT, project-level authorization, multiple simultaneous 
 
 The delivery and bounded retry path is implemented; the operational interface remains a target. The current delivery path is:
 
-1. `POST /api/events` uses `ingest_event/1` to persist the event, query active endpoints by increasing ID, and insert one pending delivery and one initial job per destination in a single `Ecto.Multi` transaction. Zero active endpoints is valid, and any insertion failure rolls back the full ingestion. `schedule_delivery/2` remains available for atomic scheduling of one delivery and job.
+1. `POST /api/events` uses `ingest_event/2` to persist the event, query active endpoints in the trusted project's scope by increasing ID, and insert one pending delivery and one initial job per destination in a single `Ecto.Multi` transaction. Zero active endpoints is valid, and any insertion failure rolls back the full ingestion. `schedule_delivery/2` remains available for atomic scheduling of one delivery and job.
 2. `DeliverWebhookWorker` consumes new jobs containing `delivery_id`, `attempt_number`, `retry_cycle`, and `cycle_attempt_number` on the `default` queue, with `max_attempts: 1`. Job uniqueness uses the worker and all four values for incomplete jobs, so later attempts can coexist with the currently executing job. The worker obtains the adapter from application configuration and delegates to `DeliveryProcessor`. For temporary legacy compatibility, jobs containing only `delivery_id` are treated as lifetime attempt 1, and jobs containing `delivery_id` and `attempt_number` retain the lifetime-number guard without a cycle identity.
 3. Before the atomic claim, the processor reads and validates the configured signing secret. Missing or invalid configuration returns a controlled error without invoking the adapter or moving the delivery to `processing`. During the claim of a new job, Tidewake locks the pending delivery and validates all three identity values: `attempt_number == delivery.attempt_count + 1`, `retry_cycle == delivery.retry_cycle`, and `cycle_attempt_number == delivery.cycle_attempt_count + 1`. A delivery with `next_attempt_at` may be claimed only when that instant is due. Stale, duplicate, future-numbered, wrong-cycle, or early jobs stop before serialization, signing, an adapter call, or attempt creation. After these guards, Tidewake queries and locks the endpoint and loads the event. An active endpoint allows the delivery to transition to `processing`; an inactive endpoint instead transitions it directly from `pending` to terminal `cancelled` with `completed_at` set.
 4. Cancellation returns before envelope encoding or adapter invocation and creates no attempt, so `attempt_count` and `cycle_attempt_count` remain unchanged. For an active endpoint, the envelope uses `id` from `external_id`, `type` from `event_type`, and `data` from the payload.
@@ -80,7 +79,7 @@ Confirmed ingestion, rejection, processing, retry scheduling and exhaustion, can
 
 ### Trusted actor and request identity
 
-`ManualRetryActor` carries a validated `type` (`service_account` or `user`), a nonempty stable opaque `subject` of at most 255 bytes, and a trusted `source` (`api`, `liveview`, or `admin_cli`). It accepts no missing or extra fields, and the command accepts only this struct rather than arbitrary request maps. Construction does not authenticate a principal or prove provenance. A future trusted boundary must derive the actor and source from authenticated server context and authorize the target delivery, including on replay. Tokens, email addresses, and free-form metadata are not actor subjects. That identity and authorization boundary does not yet exist.
+`ManualRetryActor` carries a validated `type` (`service_account` or `user`), a nonempty stable opaque `subject` of at most 255 bytes, and a trusted `source` (`api`, `liveview`, or `admin_cli`). It accepts no missing or extra fields, and the command accepts only this struct rather than arbitrary request maps. Construction does not authenticate a principal or prove provenance. A future trusted boundary must derive the actor and source from authenticated server context and authorize the target delivery, including on replay. Tokens, email addresses, and free-form metadata are not actor subjects. Service-account identity now protects the existing API; deriving this retry actor and revalidating authority within the retry transaction remain pending.
 
 `ManualRetryIdempotency` validates the positive delivery ID and the raw key before database work. Keys contain 16–128 bytes of ASCII letters, digits, period, underscore, tilde, or hyphen, without normalization. SHA-256 of the exact key bytes becomes the lowercase hexadecimal `idempotency_key_digest`; the raw key is not persisted or returned. A separate SHA-256 digest of exactly `manual_retry:v1:delivery:<delivery_id>`, using the canonical base-10 ID, becomes `request_fingerprint`. Both digests contain 64 lowercase hexadecimal characters. The fingerprint is independent of the key, actor, source, timestamps, and mutable delivery state.
 
@@ -102,9 +101,13 @@ Cycle `0` is the original automatic cycle; at most three accepted manual cycles,
 
 ## Current and future entities
 
+### Project and service account
+
+`Tidewake.Projects` stores stable project/account public UUIDs and digest-only credentials. Endpoint, Event and Delivery ownership is required and immutable through supported operations. Named restrictive foreign keys and composite Delivery references prevent cross-project links in PostgreSQL; existing data retains the recorded legacy ownership. Rotation adds a credential to the same account and preserves its actor subject.
+
 ### Endpoint
 
-The implemented `Endpoint` model represents a registered destination. Its current responsibilities are:
+The implemented `Endpoint` model represents a project-owned registered destination. Its current responsibilities are:
 
 - storing a human-readable name, an HTTP or HTTPS target URL, and an active flag;
 - persisting creation and update timestamps;
@@ -120,18 +123,18 @@ Future responsibilities may include:
 
 ### Event
 
-The implemented `Event` model represents an immutable fact accepted from a client. Events are persisted with an event type, structured payload, and microsecond UTC timestamps. `external_id` is the client-provided idempotency key and has a unique database index.
+The implemented `Event` model represents an immutable fact accepted from a client. Events are persisted with an event type, structured payload, and microsecond UTC timestamps. `external_id` is the client-provided idempotency key and is unique within its project through the `(project_id, external_id)` database index.
 
 Current responsibilities:
 
 - validating and persisting events through `Tidewake.Webhooks`;
 - rejecting duplicate `external_id` values through the database constraint;
 - supporting `POST /api/events` and individual retrieval through `GET /api/events/:id`;
-- atomically creating deliveries and initial jobs for all active endpoints during ingestion;
+- atomically creating deliveries and initial jobs for active endpoints in the event's project during ingestion;
 - exposing delivery status through `GET /api/events/:id/deliveries` without exposing endpoint URLs, payloads, attempts, headers, or secrets;
 - remaining immutable, with no update or delete operations.
 
-Project ownership and additional acceptance metadata remain future responsibilities.
+Additional acceptance metadata remains a future responsibility.
 
 ### Delivery
 
@@ -181,17 +184,16 @@ The audit stores no raw key, token, signature, secret, payload, URL, body, heade
 
 ## Current and future code boundaries
 
-`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, active endpoint lookup, atomic ingestion fan-out, delivery listing, guarded claim-time endpoint re-evaluation and cancellation, terminal finalization, transactional retry scheduling, stale-candidate selection, and single-delivery recovery. `TidewakeWeb.Plugs.RequireApiToken` authenticates every route in the Phoenix `:api` pipeline against the configured static token, using equal-length constant-time comparison and a stable `401 Unauthorized` response. Authentication remains a `TidewakeWeb` concern and does not enter the `Tidewake.Webhooks` context. `EventController` exposes event ingestion, retrieval, and the read-only delivery status route. `Envelope` serializes events, and `Signature` produces the versioned HMAC headers from the event ID, attempt timestamp, exact body bytes, and configured secret. `OutboundResolver`, `OutboundAddress`, and `OutboundTarget` resolve, classify, and pin destinations before the Req call. `ResponseLimiter` bounds and discards response bodies, while `ResponseMetadata` enforces the safe persisted metadata boundary. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation, while `DeliveryAdapters.Req` is the production transport. `RetryPolicy` classifies normalized outcomes and owns the six-attempt limit per cycle, while `RetryBackoff` calculates bounded equal-jitter delays; both receive the current cycle's attempt ordinal. `DeliveryProcessor` coordinates signing, classification, terminal finalization, and retry scheduling. `Tidewake.Workers.DeliverWebhookWorker` delegates one logical attempt to it, and `Tidewake.Workers.RecoverStaleDeliveriesWorker` performs the bounded serial maintenance scan. `TidewakeWeb.Telemetry` declares the bounded domain metrics alongside the existing Phoenix, Ecto, and VM metrics.
+`Tidewake.Webhooks` owns endpoint, event, delivery, and attempt persistence, active endpoint lookup, atomic ingestion fan-out, delivery listing, guarded claim-time endpoint re-evaluation and cancellation, terminal finalization, transactional retry scheduling, stale-candidate selection, and single-delivery recovery. `Tidewake.Projects` owns projects, service accounts, credential lifecycle, Scope and the permission policy. `RequireServiceAccount` authenticates every API route and `RequirePermission` applies its explicit permission before controller execution. Authentication remains a `TidewakeWeb` concern and does not enter the `Tidewake.Webhooks` context. `EventController` exposes event ingestion, retrieval, and the read-only delivery status route. `Envelope` serializes events, and `Signature` produces the versioned HMAC headers from the event ID, attempt timestamp, exact body bytes, and configured secret. `OutboundResolver`, `OutboundAddress`, and `OutboundTarget` resolve, classify, and pin destinations before the Req call. `ResponseLimiter` bounds and discards response bodies, while `ResponseMetadata` enforces the safe persisted metadata boundary. `DeliveryAdapter` defines the transport contract; `DeliveryAdapters.Deterministic` implements local simulation, while `DeliveryAdapters.Req` is the production transport. `RetryPolicy` classifies normalized outcomes and owns the six-attempt limit per cycle, while `RetryBackoff` calculates bounded equal-jitter delays; both receive the current cycle's attempt ordinal. `DeliveryProcessor` coordinates signing, classification, terminal finalization, and retry scheduling. `Tidewake.Workers.DeliverWebhookWorker` delegates one logical attempt to it, and `Tidewake.Workers.RecoverStaleDeliveriesWorker` performs the bounded serial maintenance scan. `TidewakeWeb.Telemetry` declares the bounded domain metrics alongside the existing Phoenix, Ecto, and VM metrics.
 
 The context also owns the internal `request_manual_retry/3` transaction, audit persistence, and actor-scoped replay resolution. `ManualRetryActor` validates trusted actor context without authenticating it; `ManualRetryIdempotency` derives protected digests without persistence; `ManualRetryPolicy` evaluates locked eligibility without side effects; and `ManualRetryRequest` maps the bounded audit evidence. The existing delivery worker executes the newly scheduled cycle through the ordinary processing pipeline. None of these modules exposes a retry route, controller, CLI command, UI, or audit retrieval operation.
 
 Additional responsibilities and namespaces may emerge as behavior is implemented:
 
-- Tidewake.Projects for ownership;
-- users, sessions, OAuth, JWT, project-level authorization, and automatic API token rotation or replacement;
+- human users, sessions, OAuth, JWT and automatic credential rotation;
 - a metrics reporter, dashboards, logs, audit reporting, and an operational LiveView.
 
-These future namespaces are not placeholders. Modules should be introduced only with tested behavior. The internal manual retry command and audit persistence are implemented, but the operation remains unexposed. Attributable principal authentication, project ownership, administrative authorization, public retry access, audit retrieval, `Retry-After`, rate limiting, retention, an operational UI, alerting, and production deployment remain pending.
+These future namespaces are not placeholders. Modules should be introduced only with tested behavior. The internal manual retry command and audit persistence are implemented, but the operation remains unexposed. Public retry access, audit retrieval, `Retry-After`, rate limiting, retention, an operational UI, alerting, and production deployment remain pending.
 
 ## Reliability principles
 

@@ -86,16 +86,6 @@ if config_env() == :prod do
     resolver: Tidewake.Webhooks.OutboundResolvers.System,
     target_mode: :public
 
-  api_token =
-    System.get_env("TIDEWAKE_API_TOKEN") ||
-      raise "environment variable TIDEWAKE_API_TOKEN is missing"
-
-  if byte_size(api_token) < 32 do
-    raise "environment variable TIDEWAKE_API_TOKEN must be at least 32 bytes"
-  end
-
-  config :tidewake, :api_token, api_token
-
   webhook_signing_secret =
     System.get_env("TIDEWAKE_WEBHOOK_SIGNING_SECRET") ||
       raise "environment variable TIDEWAKE_WEBHOOK_SIGNING_SECRET is missing"

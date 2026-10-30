@@ -5,8 +5,8 @@ defmodule TidewakeWeb.EventControllerTest do
   alias Tidewake.{Repo, Webhooks}
 
   setup %{conn: conn} do
-    api_token = Application.fetch_env!(:tidewake, :api_token)
-    conn = put_req_header(conn, "authorization", "Bearer #{api_token}")
+    %{issued: issued} = service_account_fixture("admin", legacy_project())
+    conn = put_req_header(conn, "authorization", "Bearer #{issued.token}")
 
     {:ok, conn: conn}
   end

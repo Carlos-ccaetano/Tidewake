@@ -43,6 +43,7 @@ defmodule TidewakeWeb.Plugs.RequireServiceAccount do
 
   defp unauthorized(conn) do
     conn
+    |> put_resp_header("cache-control", "no-store")
     |> put_resp_header("www-authenticate", "Bearer")
     |> put_resp_content_type("application/json")
     |> send_resp(401, @unauthorized_body)

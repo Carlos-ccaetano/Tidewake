@@ -19,7 +19,19 @@ defmodule TidewakeWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
-    plug TidewakeWeb.Plugs.RequireApiToken
+    plug TidewakeWeb.Plugs.RequireServiceAccount
+  end
+
+  pipeline :resources_read do
+    plug TidewakeWeb.Plugs.RequirePermission, :resources_read
+  end
+
+  pipeline :events_write do
+    plug TidewakeWeb.Plugs.RequirePermission, :events_write
+  end
+
+  pipeline :endpoints_write do
+    plug TidewakeWeb.Plugs.RequirePermission, :endpoints_write
   end
 
   scope "/", TidewakeWeb do
@@ -29,14 +41,24 @@ defmodule TidewakeWeb.Router do
   end
 
   scope "/api", TidewakeWeb do
-    pipe_through :api
+    pipe_through [:api, :resources_read]
 
-    post "/events", EventController, :create
     get "/events/:id", EventController, :show
     get "/events/:id/deliveries", EventController, :deliveries
-    post "/endpoints", EndpointController, :create
     get "/endpoints", EndpointController, :index
     get "/endpoints/:id", EndpointController, :show
+  end
+
+  scope "/api", TidewakeWeb do
+    pipe_through [:api, :events_write]
+
+    post "/events", EventController, :create
+  end
+
+  scope "/api", TidewakeWeb do
+    pipe_through [:api, :endpoints_write]
+
+    post "/endpoints", EndpointController, :create
     patch "/endpoints/:id", EndpointController, :update
   end
 

@@ -4,20 +4,20 @@ defmodule TidewakeWeb.EndpointController do
   alias Tidewake.Webhooks
 
   def index(conn, _params) do
-    endpoints = Enum.map(Webhooks.list_endpoints(conn.assigns.current_project), &endpoint_data/1)
+    endpoints = Enum.map(Webhooks.list_endpoints(conn.assigns.current_scope), &endpoint_data/1)
 
     json(conn, %{data: endpoints})
   end
 
   def show(conn, %{"id" => id}) do
-    case fetch_endpoint(conn.assigns.current_project, id) do
+    case fetch_endpoint(conn.assigns.current_scope, id) do
       {:ok, endpoint} -> json(conn, %{data: endpoint_data(endpoint)})
       :error -> not_found(conn)
     end
   end
 
   def create(conn, params) do
-    case Webhooks.create_endpoint(conn.assigns.current_project, params) do
+    case Webhooks.create_endpoint(conn.assigns.current_scope, params) do
       {:ok, endpoint} ->
         conn
         |> put_status(:created)
@@ -30,14 +30,14 @@ defmodule TidewakeWeb.EndpointController do
   end
 
   def update(conn, %{"id" => id} = params) do
-    case fetch_endpoint(conn.assigns.current_project, id) do
+    case fetch_endpoint(conn.assigns.current_scope, id) do
       {:ok, endpoint} -> update_endpoint(conn, endpoint, params)
       :error -> not_found(conn)
     end
   end
 
   defp update_endpoint(conn, endpoint, params) do
-    case Webhooks.update_endpoint(conn.assigns.current_project, endpoint, params) do
+    case Webhooks.update_endpoint(conn.assigns.current_scope, endpoint, params) do
       {:ok, endpoint} -> json(conn, %{data: endpoint_data(endpoint)})
       {:error, :not_found} -> not_found(conn)
       {:error, changeset} -> validation_error(conn, changeset)
