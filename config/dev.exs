@@ -1,5 +1,12 @@
 import Config
 
+config :tidewake,
+       :service_account_token_pepper,
+       System.get_env(
+         "TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER",
+         "dev-only-service-account-pepper-not-for-production"
+       )
+
 # Configure your database
 database_port = String.to_integer(System.get_env("POSTGRES_PORT", "5432"))
 

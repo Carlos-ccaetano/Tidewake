@@ -23,6 +23,19 @@ end
 config :tidewake, TidewakeWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+service_account_token_pepper =
+  if config_env() == :prod do
+    System.get_env("TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER")
+  else
+    Application.fetch_env!(:tidewake, :service_account_token_pepper)
+  end
+
+unless is_binary(service_account_token_pepper) and byte_size(service_account_token_pepper) >= 32 do
+  raise "TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER must contain at least 32 bytes"
+end
+
+config :tidewake, :service_account_token_pepper, service_account_token_pepper
+
 if config_env() == :dev do
   read_boolean = fn name ->
     case System.get_env(name, "false") do
