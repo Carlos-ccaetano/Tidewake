@@ -1,5 +1,6 @@
 defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
   use Oban.Testing, repo: Tidewake.Repo
 
   alias Tidewake.FailingDeliveryAdapter
@@ -298,7 +299,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert job.args == %{"delivery_id" => delivery.id, "attempt_number" => 1}
     end)
 
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "succeeded"
     assert finalized.attempt_count == 1
     assert [attempt] = Webhooks.list_attempts(delivery)
@@ -312,7 +313,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
     assert :ok = perform_job(DeliverWebhookWorker, %{delivery_id: delivery.id})
 
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "succeeded"
     assert finalized.attempt_count == 1
     assert [attempt] = Webhooks.list_attempts(delivery)
@@ -345,7 +346,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     end)
 
     assert_received {:delivered, _, _, _}
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "succeeded"
     assert finalized.attempt_count == 7
     assert finalized.retry_cycle == 1
@@ -375,7 +376,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
              })
 
     assert_received {:delivered, _, _, _}
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "succeeded"
     assert finalized.attempt_count == 2
     assert [attempt] = Webhooks.list_attempts(delivery)
@@ -395,7 +396,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
              perform_job(DeliverWebhookWorker, %{delivery_id: delivery.id})
 
     refute_received {:delivered, _, _, _}
-    assert Webhooks.get_delivery(delivery.id) == persisted
+    assert Webhooks.get_delivery_internal(delivery.id) == persisted
     assert Webhooks.list_attempts(delivery) == []
   end
 
@@ -421,7 +422,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
                })
 
       refute_received {:delivered, _, _, _}
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Webhooks.list_attempts(delivery) == []
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
@@ -451,7 +452,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
              })
 
     refute_received {:delivered, _, _, _}
-    assert Webhooks.get_delivery(delivery.id) == persisted
+    assert Webhooks.get_delivery_internal(delivery.id) == persisted
     assert Webhooks.list_attempts(delivery) == []
   end
 
@@ -459,14 +460,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     configure_delivery_adapter(FailingDeliveryAdapter)
 
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_worker_cancelled",
         event_type: "order.created",
         payload: %{}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Inactive before processing",
         url: "https://endpoint.invalid/http-error"
       })
@@ -476,7 +477,10 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
                Webhooks.schedule_delivery(event, endpoint)
 
       assert job.state == "available"
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
+
       assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
 
       completed_job = Repo.get!(Oban.Job, job.id)
@@ -484,7 +488,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert completed_job.attempt == 1
       assert completed_job.max_attempts == 1
 
-      cancelled = Webhooks.get_delivery(delivery.id)
+      cancelled = Webhooks.get_delivery_internal(delivery.id)
       assert cancelled.status == "cancelled"
       assert cancelled.attempt_count == 0
       assert cancelled.completed_at != nil
@@ -561,7 +565,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert completed_job.max_attempts == 1
     end)
 
-    pending = Webhooks.get_delivery(delivery.id)
+    pending = Webhooks.get_delivery_internal(delivery.id)
     assert pending.status == "pending"
     assert pending.attempt_count == 1
     assert pending.completed_at == nil
@@ -604,7 +608,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert completed_job.max_attempts == 1
     end)
 
-    pending = Webhooks.get_delivery(delivery.id)
+    pending = Webhooks.get_delivery_internal(delivery.id)
     assert pending.status == "pending"
     assert pending.attempt_count == 1
     assert pending.completed_at == nil
@@ -647,7 +651,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
       assert_received {:lifecycle_adapter_called, 1}
 
-      pending = Webhooks.get_delivery(delivery.id)
+      pending = Webhooks.get_delivery_internal(delivery.id)
       assert pending.status == "pending"
       assert pending.attempt_count == 1
       assert pending.completed_at == nil
@@ -678,7 +682,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert_received {:lifecycle_adapter_called, 2}
       refute_received {:lifecycle_adapter_called, _}
 
-      succeeded = Webhooks.get_delivery(delivery.id)
+      succeeded = Webhooks.get_delivery_internal(delivery.id)
       assert succeeded.status == "succeeded"
       assert succeeded.attempt_count == 2
       assert succeeded.next_attempt_at == nil
@@ -711,7 +715,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
         assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
         assert_received {:lifecycle_adapter_called, ^attempt_number}
 
-        persisted = Webhooks.get_delivery(delivery.id)
+        persisted = Webhooks.get_delivery_internal(delivery.id)
         attempts = Webhooks.list_attempts(persisted)
         assert Enum.map(attempts, & &1.attempt_number) == Enum.to_list(1..attempt_number)
 
@@ -759,7 +763,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert_received {:lifecycle_adapter_called, 1}
       refute_received {:lifecycle_adapter_called, _}
 
-      failed = Webhooks.get_delivery(delivery.id)
+      failed = Webhooks.get_delivery_internal(delivery.id)
       assert failed.status == "failed"
       assert failed.attempt_count == 1
       assert failed.next_attempt_at == nil
@@ -788,7 +792,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
       assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
       assert_received {:lifecycle_adapter_called, 1}
 
-      persisted = Webhooks.get_delivery(delivery.id)
+      persisted = Webhooks.get_delivery_internal(delivery.id)
       assert persisted.status == "pending"
       assert persisted.attempt_count == 1
       assert [persisted_attempt] = Webhooks.list_attempts(persisted)
@@ -800,7 +804,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
                })
 
       refute_received {:lifecycle_adapter_called, _}
-      assert Webhooks.get_delivery(delivery.id) == persisted
+      assert Webhooks.get_delivery_internal(delivery.id) == persisted
       assert Webhooks.list_attempts(persisted) == [persisted_attempt]
       assert [_successor] = all_enqueued(worker: DeliverWebhookWorker)
     end)
@@ -857,7 +861,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
         ] do
       assert {:cancel, :invalid_args} = perform_job(DeliverWebhookWorker, args)
       refute_received {:delivered, _, _, _}
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Webhooks.list_attempts(delivery) == []
     end
   end
@@ -896,14 +900,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
 
   defp delivery_fixture(path \\ "/webhooks") do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_worker",
         event_type: "order.created",
         payload: %{}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Local validation",
         url: "https://endpoint.invalid#{path}"
       })

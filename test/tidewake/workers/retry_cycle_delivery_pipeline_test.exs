@@ -1,5 +1,6 @@
 defmodule Tidewake.Workers.RetryCycleDeliveryPipelineTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
   use Oban.Testing, repo: Tidewake.Repo
 
   alias Tidewake.Webhooks
@@ -40,7 +41,7 @@ defmodule Tidewake.Workers.RetryCycleDeliveryPipelineTest do
                  )
 
         refute_received {:cycle_pipeline_adapter_called, _}
-        assert Webhooks.get_delivery(delivery.id) == delivery
+        assert Webhooks.get_delivery_internal(delivery.id) == delivery
         assert Webhooks.list_attempts(delivery) == history
       end
 
@@ -60,7 +61,7 @@ defmodule Tidewake.Workers.RetryCycleDeliveryPipelineTest do
         assert %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
         assert_received {:cycle_pipeline_adapter_called, ^cycle_attempt_number}
 
-        persisted = Webhooks.get_delivery(delivery.id)
+        persisted = Webhooks.get_delivery_internal(delivery.id)
         attempts = Webhooks.list_attempts(persisted)
         current = List.last(attempts)
 
@@ -141,14 +142,14 @@ defmodule Tidewake.Workers.RetryCycleDeliveryPipelineTest do
 
   defp delivery_fixture do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_cycle_pipeline",
         event_type: "order.created",
         payload: %{}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Cycle pipeline validation",
         url: "https://endpoint.invalid/webhooks"
       })

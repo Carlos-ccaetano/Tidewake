@@ -1,5 +1,6 @@
 defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
   use Oban.Testing, repo: Tidewake.Repo
 
   alias Tidewake.Webhooks
@@ -72,10 +73,10 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     Oban.Testing.with_testing_mode(:manual, fn ->
       assert :ok = perform_job(RecoverStaleDeliveriesWorker, %{})
 
-      assert Webhooks.get_delivery(first.id).status == "pending"
-      assert Webhooks.get_delivery(first.id).attempt_count == 2
-      assert Webhooks.get_delivery(second.id).status == "pending"
-      assert Webhooks.get_delivery(recent.id).status == "processing"
+      assert Webhooks.get_delivery_internal(first.id).status == "pending"
+      assert Webhooks.get_delivery_internal(first.id).attempt_count == 2
+      assert Webhooks.get_delivery_internal(second.id).status == "pending"
+      assert Webhooks.get_delivery_internal(recent.id).status == "processing"
 
       jobs = delivery_jobs()
 
@@ -121,8 +122,8 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
 
       assert :ok = perform_job(RecoverStaleDeliveriesWorker, %{})
 
-      assert Webhooks.get_delivery(blocked.id).status == "processing"
-      assert Webhooks.get_delivery(recoverable.id).status == "pending"
+      assert Webhooks.get_delivery_internal(blocked.id).status == "processing"
+      assert Webhooks.get_delivery_internal(recoverable.id).status == "pending"
 
       jobs = delivery_jobs()
       assert length(jobs) == 2
@@ -264,14 +265,14 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
 
   defp delivery_fixture(suffix) do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_recovery_worker_#{suffix}",
         event_type: "order.created",
         payload: %{"order_id" => suffix}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Recovery endpoint #{suffix}",
         url: "https://endpoint.invalid/webhooks/#{suffix}"
       })

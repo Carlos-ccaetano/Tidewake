@@ -16,6 +16,7 @@ defmodule Tidewake.Webhooks.Delivery do
   ]
 
   schema "deliveries" do
+    belongs_to :project, Tidewake.Projects.Project
     belongs_to :event, Event
     belongs_to :endpoint, Endpoint
 
@@ -33,6 +34,7 @@ defmodule Tidewake.Webhooks.Delivery do
     delivery
     |> cast(attrs, @fields)
     |> validate_required([
+      :project_id,
       :event_id,
       :endpoint_id,
       :status,
@@ -53,5 +55,8 @@ defmodule Tidewake.Webhooks.Delivery do
     |> check_constraint(:retry_cycle, name: :deliveries_retry_cycle_in_range)
     |> check_constraint(:cycle_attempt_count, name: :deliveries_cycle_attempt_count_in_range)
     |> unique_constraint([:event_id, :endpoint_id])
+    |> foreign_key_constraint(:project_id, name: :deliveries_project_id_fkey)
+    |> foreign_key_constraint(:event_id, name: :deliveries_event_id_fkey)
+    |> foreign_key_constraint(:endpoint_id, name: :deliveries_endpoint_id_fkey)
   end
 end

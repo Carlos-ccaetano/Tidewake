@@ -193,7 +193,7 @@ defmodule Tidewake.Webhooks.DeliveryTest do
   end
 
   defp valid_changeset(overrides \\ %{}) do
-    delivery = %Delivery{event_id: 1, endpoint_id: 2}
+    delivery = %Delivery{project_id: 1, event_id: 1, endpoint_id: 2}
 
     Delivery.changeset(delivery, overrides)
   end

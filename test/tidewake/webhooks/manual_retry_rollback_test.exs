@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Tidewake.Webhooks
 
@@ -206,7 +207,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
       assert request.reason == @rejection_reason
       assert request.resulting_retry_cycle == nil
       assert Repo.all(ManualRetryRequest) == [request]
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Repo.all(Oban.Job) == []
       assert Webhooks.list_attempts(delivery) == before_failure.attempts
     end
@@ -227,7 +228,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
 
       assert snapshot() == before_failure
       assert Repo.all(ManualRetryRequest) == [original]
-      assert Webhooks.get_delivery(second.id) == second
+      assert Webhooks.get_delivery_internal(second.id) == second
 
       assert {:ok, %{request: ^original, replayed?: true}} =
                Webhooks.request_manual_retry(first.id, actor, @key)
@@ -274,7 +275,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
 
   defp assert_rolled_back(delivery, before_failure) do
     assert snapshot() == before_failure
-    persisted = Webhooks.get_delivery(delivery.id)
+    persisted = Webhooks.get_delivery_internal(delivery.id)
     assert persisted == delivery
     assert persisted.status == "failed"
     assert persisted.retry_cycle == delivery.retry_cycle
@@ -293,7 +294,7 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
     assert request.observed_completed_at == delivery.completed_at
     assert request.resulting_retry_cycle == delivery.retry_cycle + 1
     assert Repo.all(ManualRetryRequest) == [request]
-    pending = Webhooks.get_delivery(delivery.id)
+    pending = Webhooks.get_delivery_internal(delivery.id)
     assert pending.status == "pending"
     assert pending.retry_cycle == delivery.retry_cycle + 1
     assert pending.attempt_count == delivery.attempt_count
@@ -330,14 +331,14 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
     status = Map.get(attrs, :status, "failed")
 
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: Ecto.UUID.generate(),
         event_type: "order.created",
         payload: %{"immutable" => true}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Rollback boundary",
         url: "https://endpoint.invalid/webhook"
       })
@@ -362,7 +363,9 @@ defmodule Tidewake.Webhooks.ManualRetryRollbackTest do
     end
 
     {:ok, _endpoint} =
-      Webhooks.update_endpoint(endpoint, %{active: Map.get(attrs, :endpoint_active, true)})
+      Webhooks.update_endpoint(legacy_project(), endpoint, %{
+        active: Map.get(attrs, :endpoint_active, true)
+      })
 
     delivery
     |> Delivery.changeset(%{

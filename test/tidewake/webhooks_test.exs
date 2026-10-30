@@ -1,5 +1,6 @@
 defmodule Tidewake.WebhooksTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Ecto.Changeset
   alias Tidewake.Webhooks
@@ -9,14 +10,14 @@ defmodule Tidewake.WebhooksTest do
     test "create_event/1 persists a valid event" do
       attrs = valid_event_attrs()
 
-      assert {:ok, event} = Webhooks.create_event(attrs)
+      assert {:ok, event} = Webhooks.create_event(legacy_project(), attrs)
       assert event.external_id == attrs.external_id
       assert event.event_type == attrs.event_type
       assert event.payload == attrs.payload
     end
 
     test "create_event/1 returns an invalid changeset for invalid attributes" do
-      assert {:error, %Changeset{} = changeset} = Webhooks.create_event(%{})
+      assert {:error, %Changeset{} = changeset} = Webhooks.create_event(legacy_project(), %{})
       refute changeset.valid?
     end
 
@@ -24,7 +25,7 @@ defmodule Tidewake.WebhooksTest do
       event_fixture()
 
       assert {:error, %Changeset{} = changeset} =
-               Webhooks.create_event(valid_event_attrs())
+               Webhooks.create_event(legacy_project(), valid_event_attrs())
 
       refute changeset.valid?
       assert "has already been taken" in errors_on(changeset).external_id
@@ -33,21 +34,21 @@ defmodule Tidewake.WebhooksTest do
     test "get_event/1 returns an event by its internal ID" do
       event = event_fixture()
 
-      assert Webhooks.get_event(event.id) == event
+      assert Webhooks.get_event(legacy_project(), event.id) == event
     end
 
     test "get_event/1 returns nil for an unknown ID" do
-      assert Webhooks.get_event(-1) == nil
+      assert Webhooks.get_event(legacy_project(), -1) == nil
     end
 
     test "get_event_by_external_id/1 returns an event by its external ID" do
       event = event_fixture()
 
-      assert Webhooks.get_event_by_external_id(event.external_id) == event
+      assert Webhooks.get_event_by_external_id(legacy_project(), event.external_id) == event
     end
 
     test "get_event_by_external_id/1 returns nil for an unknown external ID" do
-      assert Webhooks.get_event_by_external_id("unknown") == nil
+      assert Webhooks.get_event_by_external_id(legacy_project(), "unknown") == nil
     end
   end
 
@@ -55,9 +56,9 @@ defmodule Tidewake.WebhooksTest do
     test "persists an event with empty fan-out when there are no active endpoints" do
       Oban.Testing.with_testing_mode(:manual, fn ->
         assert {:ok, %{event: event, deliveries: [], jobs: []}} =
-                 Webhooks.ingest_event(valid_event_attrs())
+                 Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
-        assert Webhooks.get_event(event.id) == event
+        assert Webhooks.get_event(legacy_project(), event.id) == event
         assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
         assert Repo.aggregate(Oban.Job, :count) == 0
       end)
@@ -68,7 +69,7 @@ defmodule Tidewake.WebhooksTest do
         endpoint = endpoint_fixture()
 
         assert {:ok, %{event: event, deliveries: [delivery], jobs: [job]}} =
-                 Webhooks.ingest_event(valid_event_attrs())
+                 Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
         assert delivery.event_id == event.id
         assert delivery.endpoint_id == endpoint.id
@@ -93,7 +94,7 @@ defmodule Tidewake.WebhooksTest do
                  "cycle_attempt_number" => 1
                }
 
-        assert Webhooks.get_delivery(delivery.id) == delivery
+        assert Webhooks.get_delivery_internal(delivery.id) == delivery
       end)
     end
 
@@ -105,7 +106,7 @@ defmodule Tidewake.WebhooksTest do
         third_active = endpoint_fixture(%{name: "Third active"})
 
         assert {:ok, %{event: event, deliveries: deliveries, jobs: jobs}} =
-                 Webhooks.ingest_event(valid_event_attrs())
+                 Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
         assert Enum.map(deliveries, & &1.endpoint_id) == [
                  first_active.id,
@@ -140,7 +141,7 @@ defmodule Tidewake.WebhooksTest do
       Oban.Testing.with_testing_mode(:manual, fn ->
         _endpoint = endpoint_fixture()
 
-        assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(%{})
+        assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(legacy_project(), %{})
 
         refute changeset.valid?
         assert "can't be blank" in errors_on(changeset).external_id
@@ -158,20 +159,22 @@ defmodule Tidewake.WebhooksTest do
                   event: existing_event,
                   deliveries: existing_deliveries,
                   jobs: existing_jobs
-                }} = Webhooks.ingest_event(valid_event_attrs())
+                }} = Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
         counts_before_conflict = fanout_record_counts()
         delivery_ids_before_conflict = Enum.map(existing_deliveries, & &1.id)
         job_ids_before_conflict = Enum.map(existing_jobs, & &1.id)
 
         assert {:error, %Changeset{} = changeset} =
-                 Webhooks.ingest_event(valid_event_attrs())
+                 Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
         refute changeset.valid?
         assert "has already been taken" in errors_on(changeset).external_id
         assert fanout_record_counts() == counts_before_conflict
         assert counts_before_conflict == %{events: 1, deliveries: 2, jobs: 2}
-        assert Webhooks.get_event_by_external_id(existing_event.external_id) == existing_event
+
+        assert Webhooks.get_event_by_external_id(legacy_project(), existing_event.external_id) ==
+                 existing_event
 
         assert Repo.all(Tidewake.Webhooks.Delivery)
                |> Enum.map(& &1.id)
@@ -212,10 +215,14 @@ defmodule Tidewake.WebhooksTest do
         """)
 
         assert_raise Ecto.ConstraintError, fn ->
-          Webhooks.ingest_event(valid_event_attrs())
+          Webhooks.ingest_event(legacy_project(), valid_event_attrs())
         end
 
-        assert Webhooks.get_event_by_external_id(valid_event_attrs().external_id) == nil
+        assert Webhooks.get_event_by_external_id(
+                 legacy_project(),
+                 valid_event_attrs().external_id
+               ) == nil
+
         assert fanout_record_counts() == %{events: 0, deliveries: 0, jobs: 0}
       end)
     end
@@ -245,7 +252,7 @@ defmodule Tidewake.WebhooksTest do
         assert job.max_attempts == 1
         assert job.state == "available"
         assert Repo.get(Oban.Job, job.id).args == job.args
-        assert Webhooks.get_delivery(delivery.id) == delivery
+        assert Webhooks.get_delivery_internal(delivery.id) == delivery
 
         assert job.unique.keys == [
                  :delivery_id,
@@ -330,17 +337,17 @@ defmodule Tidewake.WebhooksTest do
       endpoint = endpoint_fixture()
       {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
 
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
     end
 
     test "get_delivery/1 returns nil for an unknown ID" do
-      assert Webhooks.get_delivery(-1) == nil
+      assert Webhooks.get_delivery_internal(-1) == nil
     end
 
     test "list_deliveries_for_event/1 returns an empty list without deliveries" do
       event = event_fixture()
 
-      assert Webhooks.list_deliveries_for_event(event) == []
+      assert Webhooks.list_deliveries_for_event(legacy_project(), event) == []
       assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
@@ -357,11 +364,16 @@ defmodule Tidewake.WebhooksTest do
 
       assert first_delivery.id < other_delivery.id
       assert other_delivery.id < second_delivery.id
-      assert Webhooks.list_deliveries_for_event(event) == [first_delivery, second_delivery]
-      assert Webhooks.list_deliveries_for_event(other_event) == [other_delivery]
+
+      assert Webhooks.list_deliveries_for_event(legacy_project(), event) == [
+               first_delivery,
+               second_delivery
+             ]
+
+      assert Webhooks.list_deliveries_for_event(legacy_project(), other_event) == [other_delivery]
       assert Repo.aggregate(Oban.Job, :count) == 0
-      assert Webhooks.get_delivery(first_delivery.id) == first_delivery
-      assert Webhooks.get_delivery(second_delivery.id) == second_delivery
+      assert Webhooks.get_delivery_internal(first_delivery.id) == first_delivery
+      assert Webhooks.get_delivery_internal(second_delivery.id) == second_delivery
     end
 
     test "get_delivery_by_event_and_endpoint/2 returns the matching delivery" do
@@ -504,8 +516,10 @@ defmodule Tidewake.WebhooksTest do
           next_attempt_at: scheduled_at
         })
 
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
 
       assert {:error, :not_due} =
                Webhooks.claim_delivery(delivery.id, 2, reference_time)
@@ -535,8 +549,10 @@ defmodule Tidewake.WebhooksTest do
           next_attempt_at: reference_time
         })
 
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
 
       for attempt_number <- [2, 4] do
         assert {:error, :stale_attempt} =
@@ -558,8 +574,10 @@ defmodule Tidewake.WebhooksTest do
           next_attempt_at: ~U[2099-01-15 12:00:00.123456Z]
         })
 
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
 
       identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
 
@@ -605,8 +623,11 @@ defmodule Tidewake.WebhooksTest do
           next_attempt_at: scheduled_at
         })
 
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
+
       before_claim = DateTime.utc_now()
 
       assert {:cancelled, cancelled} =
@@ -624,7 +645,7 @@ defmodule Tidewake.WebhooksTest do
       refute cancelled.endpoint.active
       assert Ecto.assoc_loaded?(cancelled.event)
       assert Ecto.assoc_loaded?(cancelled.endpoint)
-      assert Webhooks.get_delivery(delivery.id).status == "cancelled"
+      assert Webhooks.get_delivery_internal(delivery.id).status == "cancelled"
       assert Webhooks.list_attempts(cancelled) == []
 
       assert {:error, :invalid_transition} =
@@ -643,8 +664,10 @@ defmodule Tidewake.WebhooksTest do
           next_attempt_at: scheduled_at
         })
 
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
-      assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
+
+      assert {:ok, _endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
 
       identity = %{attempt_number: 7, retry_cycle: 1, cycle_attempt_number: 1}
 
@@ -658,7 +681,7 @@ defmodule Tidewake.WebhooksTest do
       assert cancelled.next_attempt_at == nil
       assert cancelled.completed_at != nil
       refute cancelled.endpoint.active
-      assert Webhooks.get_delivery(delivery.id).status == "cancelled"
+      assert Webhooks.get_delivery_internal(delivery.id).status == "cancelled"
       assert Webhooks.list_attempts(cancelled) == []
     end
 
@@ -666,7 +689,7 @@ defmodule Tidewake.WebhooksTest do
       test "claim_delivery/3 rejects a delivery already in #{status}" do
         status = unquote(status)
         delivery = delivery_fixture()
-        endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+        endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
         completed_at = ~U[2026-09-25 12:00:00.123456Z]
 
         attrs =
@@ -682,7 +705,8 @@ defmodule Tidewake.WebhooksTest do
           |> Changeset.change(attrs)
           |> Repo.update!()
 
-        assert {:ok, _endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+        assert {:ok, _endpoint} =
+                 Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
 
         assert {:error, :invalid_transition} =
                  Webhooks.claim_delivery(
@@ -691,7 +715,7 @@ defmodule Tidewake.WebhooksTest do
                    ~U[2026-10-16 12:00:00.123456Z]
                  )
 
-        assert Webhooks.get_delivery(delivery.id) == persisted
+        assert Webhooks.get_delivery_internal(delivery.id) == persisted
         assert Webhooks.list_attempts(delivery) == []
         assert Repo.aggregate(Oban.Job, :count) == 0
       end
@@ -872,7 +896,7 @@ defmodule Tidewake.WebhooksTest do
       assert {:error, :not_stale} =
                Webhooks.recover_stale_delivery(processing.id, stale_before)
 
-      assert Webhooks.get_delivery(processing.id) == processing
+      assert Webhooks.get_delivery_internal(processing.id) == processing
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
 
@@ -892,7 +916,7 @@ defmodule Tidewake.WebhooksTest do
                    ~U[2026-09-28 12:00:00.000000Z]
                  )
 
-        assert Webhooks.get_delivery(current.id) == current
+        assert Webhooks.get_delivery_internal(current.id) == current
         assert Repo.aggregate(Oban.Job, :count) == 0
       end
     end
@@ -932,7 +956,7 @@ defmodule Tidewake.WebhooksTest do
                    ~U[2026-09-28 12:00:00.000000Z]
                  )
 
-        assert Webhooks.get_delivery(processing.id) == processing
+        assert Webhooks.get_delivery_internal(processing.id) == processing
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
         assert Webhooks.list_attempts(processing) == []
       end)
@@ -953,7 +977,7 @@ defmodule Tidewake.WebhooksTest do
                    ~U[2026-09-28 12:00:00.000000Z]
                  )
 
-        assert Webhooks.get_delivery(processing.id) == processing
+        assert Webhooks.get_delivery_internal(processing.id) == processing
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
       end)
     end
@@ -973,7 +997,7 @@ defmodule Tidewake.WebhooksTest do
                    ~U[2026-09-28 12:00:00.000000Z]
                  )
 
-        assert Webhooks.get_delivery(processing.id) == processing
+        assert Webhooks.get_delivery_internal(processing.id) == processing
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
       end)
     end
@@ -1021,7 +1045,7 @@ defmodule Tidewake.WebhooksTest do
         assert {:error, :invalid_transition} =
                  Webhooks.recover_stale_delivery(processing.id, stale_before)
 
-        assert Webhooks.get_delivery(processing.id) == recovered
+        assert Webhooks.get_delivery_internal(processing.id) == recovered
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [job.id]
       end)
     end
@@ -1188,7 +1212,7 @@ defmodule Tidewake.WebhooksTest do
         assert job.max_attempts == 1
         refute job.conflict?
 
-        assert Webhooks.get_delivery(pending.id) == pending
+        assert Webhooks.get_delivery_internal(pending.id) == pending
         assert Webhooks.list_attempts(pending) == [attempt]
         assert Repo.get!(Oban.Job, job.id).scheduled_at == retry_at
         assert Repo.aggregate(Oban.Job, :count) == 1
@@ -1251,7 +1275,7 @@ defmodule Tidewake.WebhooksTest do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture("evt_invalid_retry_attempt")
         assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
-        before_retry = Webhooks.get_delivery(processing.id)
+        before_retry = Webhooks.get_delivery_internal(processing.id)
 
         attrs =
           valid_attempt_attrs()
@@ -1266,7 +1290,7 @@ defmodule Tidewake.WebhooksTest do
 
         refute changeset.valid?
         assert "must be greater than or equal to 0" in errors_on(changeset).duration_ms
-        assert Webhooks.get_delivery(processing.id) == before_retry
+        assert Webhooks.get_delivery_internal(processing.id) == before_retry
         assert before_retry.attempt_count == 0
         assert before_retry.cycle_attempt_count == 0
         assert Webhooks.list_attempts(processing) == []
@@ -1278,7 +1302,7 @@ defmodule Tidewake.WebhooksTest do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture("evt_invalid_retry_time")
         assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
-        before_retry = Webhooks.get_delivery(processing.id)
+        before_retry = Webhooks.get_delivery_internal(processing.id)
         completed_at = ~U[2026-09-10 12:00:00.248456Z]
 
         attrs =
@@ -1291,7 +1315,7 @@ defmodule Tidewake.WebhooksTest do
 
           refute changeset.valid?
           assert "must be later than completed_at" in errors_on(changeset).next_attempt_at
-          assert Webhooks.get_delivery(processing.id) == before_retry
+          assert Webhooks.get_delivery_internal(processing.id) == before_retry
           assert Webhooks.list_attempts(processing) == []
           assert Repo.aggregate(Oban.Job, :count) == 0
         end
@@ -1302,7 +1326,7 @@ defmodule Tidewake.WebhooksTest do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture("evt_retry_job_conflict")
         assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
-        before_retry = Webhooks.get_delivery(processing.id)
+        before_retry = Webhooks.get_delivery_internal(processing.id)
         retry_at = ~U[2099-01-15 12:00:00.248457Z]
 
         assert {:ok, active_job} =
@@ -1316,7 +1340,7 @@ defmodule Tidewake.WebhooksTest do
         assert {:error, :active_job} =
                  Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
 
-        assert Webhooks.get_delivery(processing.id) == before_retry
+        assert Webhooks.get_delivery_internal(processing.id) == before_retry
         assert before_retry.attempt_count == 0
         assert before_retry.cycle_attempt_count == 0
         assert Webhooks.list_attempts(processing) == []
@@ -1328,7 +1352,7 @@ defmodule Tidewake.WebhooksTest do
       Oban.Testing.with_testing_mode(:manual, fn ->
         delivery = delivery_fixture("evt_cycle_retry_job_conflict")
         assert {:ok, processing} = Webhooks.claim_delivery(delivery.id)
-        before_retry = Webhooks.get_delivery(processing.id)
+        before_retry = Webhooks.get_delivery_internal(processing.id)
         retry_at = ~U[2099-01-15 12:00:00.248457Z]
 
         assert {:ok, active_job} =
@@ -1348,7 +1372,7 @@ defmodule Tidewake.WebhooksTest do
         assert {:error, :active_job} =
                  Webhooks.schedule_delivery_retry(processing.id, attrs, retry_at)
 
-        assert Webhooks.get_delivery(processing.id) == before_retry
+        assert Webhooks.get_delivery_internal(processing.id) == before_retry
         assert Webhooks.list_attempts(processing) == []
         assert Enum.map(Repo.all(Oban.Job), & &1.id) == [active_job.id]
       end)
@@ -1372,7 +1396,7 @@ defmodule Tidewake.WebhooksTest do
                      ~U[2099-01-15 12:00:00.248457Z]
                    )
 
-          assert Webhooks.get_delivery(current.id) == current
+          assert Webhooks.get_delivery_internal(current.id) == current
           assert Webhooks.list_attempts(current) == []
         end
 
@@ -1419,7 +1443,7 @@ defmodule Tidewake.WebhooksTest do
       assert attempt.attempt_number == 1
       assert attempt.retry_cycle == 0
       assert attempt.cycle_attempt_number == 1
-      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.get_delivery_internal(delivery.id) == finalized
       assert Webhooks.list_attempts(finalized) == [attempt]
     end
 
@@ -1490,13 +1514,13 @@ defmodule Tidewake.WebhooksTest do
     test "invalid attempts leave the delivery and attempt history unchanged" do
       delivery = delivery_fixture()
       {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
-      before = Webhooks.get_delivery(delivery.id)
+      before = Webhooks.get_delivery_internal(delivery.id)
 
       assert {:error, %Changeset{} = changeset} =
                Webhooks.finalize_delivery(delivery.id, %{duration_ms: -1})
 
       refute changeset.valid?
-      assert Webhooks.get_delivery(delivery.id) == before
+      assert Webhooks.get_delivery_internal(delivery.id) == before
       assert before.attempt_count == 0
       assert before.cycle_attempt_count == 0
       assert Webhooks.list_attempts(delivery) == []
@@ -1506,13 +1530,13 @@ defmodule Tidewake.WebhooksTest do
       delivery = delivery_fixture()
       existing = attempt_fixture(delivery)
       {:ok, _claimed} = Webhooks.claim_delivery(delivery.id)
-      before = Webhooks.get_delivery(delivery.id)
+      before = Webhooks.get_delivery_internal(delivery.id)
 
       assert {:error, %Changeset{} = changeset} =
                Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
 
       refute changeset.valid?
-      assert Webhooks.get_delivery(delivery.id) == before
+      assert Webhooks.get_delivery_internal(delivery.id) == before
       assert Webhooks.list_attempts(delivery) == [existing]
     end
 
@@ -1526,7 +1550,7 @@ defmodule Tidewake.WebhooksTest do
         assert {:error, :invalid_transition} =
                  Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
 
-        assert Webhooks.get_delivery(delivery.id) == current
+        assert Webhooks.get_delivery_internal(delivery.id) == current
         assert Webhooks.list_attempts(delivery) == []
       end
     end
@@ -1541,7 +1565,7 @@ defmodule Tidewake.WebhooksTest do
       assert {:error, :invalid_transition} =
                Webhooks.finalize_delivery(delivery.id, valid_attempt_attrs())
 
-      assert Webhooks.get_delivery(delivery.id) == finalized
+      assert Webhooks.get_delivery_internal(delivery.id) == finalized
       assert Webhooks.list_attempts(delivery) == [attempt]
     end
   end
@@ -1632,7 +1656,7 @@ defmodule Tidewake.WebhooksTest do
 
       assert {:ok, _attempt} = Webhooks.create_attempt(delivery, valid_attempt_attrs())
 
-      persisted_delivery = Webhooks.get_delivery(delivery.id)
+      persisted_delivery = Webhooks.get_delivery_internal(delivery.id)
       assert persisted_delivery.status == "pending"
       assert persisted_delivery.attempt_count == 0
       assert persisted_delivery.cycle_attempt_count == 0
@@ -1642,21 +1666,23 @@ defmodule Tidewake.WebhooksTest do
 
   describe "endpoints" do
     test "create_endpoint/1 creates a valid endpoint" do
-      assert {:ok, endpoint} = Webhooks.create_endpoint(valid_attrs())
+      assert {:ok, endpoint} = Webhooks.create_endpoint(legacy_project(), valid_attrs())
       assert endpoint.name == "Ironhold"
       assert endpoint.url == "https://ironhold.example.com/api/webhooks"
       assert endpoint.active
     end
 
     test "create_endpoint/1 returns an error for invalid attributes" do
-      assert {:error, changeset} = Webhooks.create_endpoint(%{name: "", url: "not-a-url"})
+      assert {:error, changeset} =
+               Webhooks.create_endpoint(legacy_project(), %{name: "", url: "not-a-url"})
+
       refute changeset.valid?
     end
 
     test "list_endpoints/0 returns persisted endpoints" do
       endpoint = endpoint_fixture()
 
-      assert Webhooks.list_endpoints() == [endpoint]
+      assert Webhooks.list_endpoints(legacy_project()) == [endpoint]
     end
 
     test "list_active_endpoints/0 returns only active endpoints ordered by ID" do
@@ -1665,8 +1691,8 @@ defmodule Tidewake.WebhooksTest do
       _inactive = endpoint_fixture(%{name: "Inactive", active: false})
       second_active = endpoint_fixture(%{name: "Second active"})
 
-      assert Webhooks.list_active_endpoints() == [first_active, second_active]
-      assert Webhooks.get_event(event.id) == event
+      assert Webhooks.list_active_endpoints(legacy_project()) == [first_active, second_active]
+      assert Webhooks.get_event(legacy_project(), event.id) == event
       assert Repo.aggregate(Tidewake.Webhooks.Delivery, :count) == 0
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
@@ -1674,24 +1700,24 @@ defmodule Tidewake.WebhooksTest do
     test "list_active_endpoints/0 returns an empty list without active endpoints" do
       _inactive = endpoint_fixture(%{active: false})
 
-      assert Webhooks.list_active_endpoints() == []
+      assert Webhooks.list_active_endpoints(legacy_project()) == []
     end
 
     test "get_endpoint/1 returns an existing endpoint" do
       endpoint = endpoint_fixture()
 
-      assert Webhooks.get_endpoint(endpoint.id) == endpoint
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id) == endpoint
     end
 
     test "get_endpoint/1 returns nil for an unknown ID" do
-      assert Webhooks.get_endpoint(-1) == nil
+      assert Webhooks.get_endpoint(legacy_project(), -1) == nil
     end
 
     test "update_endpoint/2 updates the name" do
       endpoint = endpoint_fixture()
 
       assert {:ok, updated_endpoint} =
-               Webhooks.update_endpoint(endpoint, %{name: "Primary Ironhold"})
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{name: "Primary Ironhold"})
 
       assert updated_endpoint.name == "Primary Ironhold"
     end
@@ -1700,7 +1726,7 @@ defmodule Tidewake.WebhooksTest do
       endpoint = endpoint_fixture()
 
       assert {:ok, updated_endpoint} =
-               Webhooks.update_endpoint(endpoint, %{
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{
                  url: "https://secondary.ironhold.example.com/webhooks"
                })
 
@@ -1710,39 +1736,48 @@ defmodule Tidewake.WebhooksTest do
     test "update_endpoint/2 deactivates an endpoint" do
       endpoint = endpoint_fixture()
 
-      assert {:ok, updated_endpoint} = Webhooks.update_endpoint(endpoint, %{active: false})
+      assert {:ok, updated_endpoint} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{active: false})
+
       refute updated_endpoint.active
     end
 
     test "update_endpoint/2 returns an error for invalid attributes" do
       endpoint = endpoint_fixture()
 
-      assert {:error, changeset} = Webhooks.update_endpoint(endpoint, %{url: "not-a-url"})
+      assert {:error, changeset} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{url: "not-a-url"})
+
       refute changeset.valid?
     end
 
     test "update_endpoint/2 does not persist an invalid URL" do
       endpoint = endpoint_fixture()
 
-      assert {:error, changeset} = Webhooks.update_endpoint(endpoint, %{url: "not-a-url"})
+      assert {:error, changeset} =
+               Webhooks.update_endpoint(legacy_project(), endpoint, %{url: "not-a-url"})
+
       refute changeset.valid?
 
-      persisted_endpoint = Webhooks.get_endpoint(endpoint.id)
+      persisted_endpoint = Webhooks.get_endpoint(legacy_project(), endpoint.id)
       assert persisted_endpoint.url == endpoint.url
     end
 
     test "change_endpoint/2 returns a changeset without persisting" do
       endpoint = endpoint_fixture()
 
-      assert %Changeset{} = changeset = Webhooks.change_endpoint(endpoint, %{name: "Changed"})
+      assert %Changeset{} =
+               changeset =
+               Webhooks.change_endpoint(legacy_project(), endpoint, %{name: "Changed"})
+
       assert changeset.changes.name == "Changed"
-      assert Webhooks.get_endpoint(endpoint.id).name == "Ironhold"
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id).name == "Ironhold"
     end
   end
 
   defp event_fixture(attrs \\ %{}) do
     attrs = Map.merge(valid_event_attrs(), attrs)
-    {:ok, event} = Webhooks.create_event(attrs)
+    {:ok, event} = Webhooks.create_event(legacy_project(), attrs)
     event
   end
 
@@ -1756,7 +1791,7 @@ defmodule Tidewake.WebhooksTest do
 
   defp endpoint_fixture(attrs \\ %{}) do
     attrs = Map.merge(valid_attrs(), attrs)
-    {:ok, endpoint} = Webhooks.create_endpoint(attrs)
+    {:ok, endpoint} = Webhooks.create_endpoint(legacy_project(), attrs)
     endpoint
   end
 
@@ -1784,7 +1819,7 @@ defmodule Tidewake.WebhooksTest do
   end
 
   defp assert_claim_rejected_without_mutation(delivery) do
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert Webhooks.list_attempts(delivery) == []
     assert Repo.aggregate(Oban.Job, :count) == 0
   end

@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.ManualRetryTest do
   use ExUnit.Case, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   import Ecto.Changeset, only: [change: 2]
   import Ecto.Query, only: [from: 2]
@@ -27,8 +28,8 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     } do
       delivery = delivery_fixture(%{retry_cycle: @cycle})
       history = Webhooks.list_attempts(delivery)
-      event = Webhooks.get_event(delivery.event_id)
-      endpoint = Webhooks.get_endpoint(delivery.endpoint_id)
+      event = Webhooks.get_event(legacy_project(), delivery.event_id)
+      endpoint = Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id)
       before_request = DateTime.utc_now()
 
       assert {:ok, %{request: request, replayed?: false}} =
@@ -49,7 +50,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       assert DateTime.compare(request.requested_at, DateTime.utc_now()) in [:eq, :lt]
       assert request == Repo.get!(ManualRetryRequest, request.id)
 
-      pending = Webhooks.get_delivery(delivery.id)
+      pending = Webhooks.get_delivery_internal(delivery.id)
       assert pending.status == "pending"
       assert pending.retry_cycle == @cycle + 1
       assert pending.cycle_attempt_count == 0
@@ -60,8 +61,8 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       assert pending.event_id == event.id
       assert pending.endpoint_id == endpoint.id
       assert pending.inserted_at == delivery.inserted_at
-      assert Webhooks.get_event(event.id) == event
-      assert Webhooks.get_endpoint(endpoint.id) == endpoint
+      assert Webhooks.get_event(legacy_project(), event.id) == event
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id) == endpoint
       assert Webhooks.list_attempts(delivery) == history
       assert length(history) == delivery.attempt_count
       assert Repo.aggregate(ManualRetryRequest, :count) == 1
@@ -89,7 +90,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
              Webhooks.request_manual_retry(delivery.id, actor, @key)
 
     assert [%{args: %{"attempt_number" => 2, "cycle_attempt_number" => 1}}] = Repo.all(Oban.Job)
-    assert Webhooks.get_delivery(delivery.id).attempt_count == 1
+    assert Webhooks.get_delivery_internal(delivery.id).attempt_count == 1
   end
 
   for status <- ~w(pending processing succeeded cancelled) do
@@ -108,7 +109,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       assert request.observed_retry_cycle == delivery.retry_cycle
       assert request.observed_completed_at == delivery.completed_at
       assert request.resulting_retry_cycle == nil
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Webhooks.list_attempts(delivery) == history
       assert Repo.all(Oban.Job) == []
       assert Repo.aggregate(ManualRetryRequest, :count) == 1
@@ -126,7 +127,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     assert request.outcome == "rejected"
     assert request.reason == "manual_cycle_limit_reached"
     assert request.resulting_retry_cycle == nil
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert Webhooks.list_attempts(delivery) == history
     assert Repo.all(Oban.Job) == []
   end
@@ -135,17 +136,19 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     delivery = delivery_fixture(%{retry_cycle: 3})
 
     {:ok, endpoint} =
-      delivery.endpoint_id
-      |> Webhooks.get_endpoint()
-      |> Webhooks.update_endpoint(%{active: false})
+      Webhooks.update_endpoint(
+        legacy_project(),
+        Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id),
+        %{active: false}
+      )
 
     history = Webhooks.list_attempts(delivery)
     assert {:ok, %{request: request}} = Webhooks.request_manual_retry(delivery.id, actor, @key)
     assert request.outcome == "rejected"
     assert request.reason == "endpoint_inactive"
     assert request.resulting_retry_cycle == nil
-    assert Webhooks.get_delivery(delivery.id) == delivery
-    assert Webhooks.get_endpoint(endpoint.id) == endpoint
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
+    assert Webhooks.get_endpoint(legacy_project(), endpoint.id) == endpoint
     assert Webhooks.list_attempts(delivery) == history
     assert Repo.all(Oban.Job) == []
   end
@@ -156,14 +159,16 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     for status <- ~w(pending processing succeeded cancelled) do
       delivery = delivery_fixture(%{status: status, retry_cycle: 3})
 
-      delivery.endpoint_id
-      |> Webhooks.get_endpoint()
-      |> Webhooks.update_endpoint(%{active: false})
+      Webhooks.update_endpoint(
+        legacy_project(),
+        Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id),
+        %{active: false}
+      )
 
       assert {:ok, %{request: %{reason: "state_not_failed"}}} =
                Webhooks.request_manual_retry(delivery.id, actor, @key <> status)
 
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
     end
 
     assert Repo.all(Oban.Job) == []
@@ -202,7 +207,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     end
 
     refute_received :manual_retry_database_query
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert_empty_audit_and_jobs()
   end
 
@@ -236,14 +241,20 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     assert {:ok, %{request: original, replayed?: false}} =
              Webhooks.request_manual_retry(delivery.id, actor, @key)
 
-    pending = Webhooks.get_delivery(delivery.id)
-    delivery.endpoint_id |> Webhooks.get_endpoint() |> Webhooks.update_endpoint(%{active: false})
+    pending = Webhooks.get_delivery_internal(delivery.id)
+
+    Webhooks.update_endpoint(
+      legacy_project(),
+      Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id),
+      %{active: false}
+    )
+
     jobs = Repo.all(Oban.Job)
 
     assert {:ok, %{request: ^original, replayed?: true}} =
              Webhooks.request_manual_retry(delivery.id, %{actor | source: "admin_cli"}, @key)
 
-    assert Webhooks.get_delivery(delivery.id) == pending
+    assert Webhooks.get_delivery_internal(delivery.id) == pending
     assert Repo.all(Oban.Job) == jobs
     assert Repo.all(ManualRetryRequest) == [original]
     assert original.source == "api"
@@ -253,15 +264,26 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     actor: actor
   } do
     delivery = delivery_fixture()
-    delivery.endpoint_id |> Webhooks.get_endpoint() |> Webhooks.update_endpoint(%{active: false})
+
+    Webhooks.update_endpoint(
+      legacy_project(),
+      Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id),
+      %{active: false}
+    )
+
     assert {:ok, %{request: original}} = Webhooks.request_manual_retry(delivery.id, actor, @key)
     assert original.reason == "endpoint_inactive"
-    delivery.endpoint_id |> Webhooks.get_endpoint() |> Webhooks.update_endpoint(%{active: true})
+
+    Webhooks.update_endpoint(
+      legacy_project(),
+      Webhooks.get_endpoint(legacy_project(), delivery.endpoint_id),
+      %{active: true}
+    )
 
     assert {:ok, %{request: ^original, replayed?: true}} =
              Webhooks.request_manual_retry(delivery.id, actor, @key)
 
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert Repo.all(ManualRetryRequest) == [original]
     assert Repo.all(Oban.Job) == []
   end
@@ -269,7 +291,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
   test "a fresh key after acceptance records the pending state", %{actor: actor} do
     delivery = delivery_fixture()
     assert {:ok, %{request: accepted}} = Webhooks.request_manual_retry(delivery.id, actor, @key)
-    pending = Webhooks.get_delivery(delivery.id)
+    pending = Webhooks.get_delivery_internal(delivery.id)
     jobs = Repo.all(Oban.Job)
 
     assert {:ok, %{request: rejected, replayed?: false}} =
@@ -282,7 +304,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     assert rejected.resulting_retry_cycle == nil
     assert Repo.get!(ManualRetryRequest, accepted.id) == accepted
     assert Repo.aggregate(ManualRetryRequest, :count) == 2
-    assert Webhooks.get_delivery(delivery.id) == pending
+    assert Webhooks.get_delivery_internal(delivery.id) == pending
     assert Repo.all(Oban.Job) == jobs
   end
 
@@ -292,7 +314,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     assert {:ok, %{request: original}} = Webhooks.request_manual_retry(first.id, actor, @key)
     jobs = Repo.all(Oban.Job)
     assert {:error, :idempotency_conflict} = Webhooks.request_manual_retry(second.id, actor, @key)
-    assert Webhooks.get_delivery(second.id) == second
+    assert Webhooks.get_delivery_internal(second.id) == second
     assert Repo.all(ManualRetryRequest) == [original]
     assert Repo.all(Oban.Job) == jobs
   end
@@ -340,7 +362,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
         )
 
       assert {:error, :active_job} = Webhooks.request_manual_retry(delivery.id, actor, @key)
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Repo.all(ManualRetryRequest) == []
       assert Repo.all(Oban.Job) == [job]
     end
@@ -398,7 +420,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     delivery = delivery_fixture()
     job = insert_job(%{"delivery_id" => delivery.id})
     assert {:error, :active_job} = Webhooks.request_manual_retry(delivery.id, actor, @key)
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert Repo.all(ManualRetryRequest) == []
     assert Repo.all(Oban.Job) == [job]
   end
@@ -409,7 +431,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     {:ok, conflict} = DeliverWebhookWorker.new_for_delivery(delivery.id, 7, 1, 1) |> Oban.insert()
     before = Repo.get!(Oban.Job, conflict.id)
     assert {:error, :active_job} = Webhooks.request_manual_retry(delivery.id, actor, @key)
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
     assert Repo.all(ManualRetryRequest) == []
     assert Repo.all(Oban.Job) == [before]
     conflict |> change(state: "completed", completed_at: DateTime.utc_now()) |> Repo.update!()
@@ -443,7 +465,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
              Webhooks.request_manual_retry(delivery.id, actor, @key)
 
     assert Repo.all(Oban.Job) == [job]
-    assert Webhooks.get_delivery(delivery.id) == delivery
+    assert Webhooks.get_delivery_internal(delivery.id) == delivery
   end
 
   for table <- ~w(manual_retry_requests deliveries oban_jobs) do
@@ -459,7 +481,7 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       assert {:error, :persistence_error} =
                Webhooks.request_manual_retry(delivery.id, actor, @key)
 
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Webhooks.list_attempts(delivery) == history
       assert_empty_audit_and_jobs()
       Repo.query!("ALTER TABLE #{@failure_table} DROP CONSTRAINT reject_manual_retry_test")
@@ -554,8 +576,8 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
       winner = Enum.find([first, second], &(&1.id == request.delivery_id))
       loser = Enum.find([first, second], &(&1.id != request.delivery_id))
       assert request.outcome == "accepted"
-      assert Webhooks.get_delivery(winner.id).status == "pending"
-      assert Webhooks.get_delivery(loser.id) == loser
+      assert Webhooks.get_delivery_internal(winner.id).status == "pending"
+      assert Webhooks.get_delivery_internal(loser.id) == loser
 
       assert Repo.aggregate(
                from(job in Oban.Job,
@@ -599,14 +621,17 @@ defmodule Tidewake.Webhooks.ManualRetryTest do
     cycle_count = Map.get(overrides, :cycle_attempt_count, 6)
 
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "manual-retry-#{System.unique_integer([:positive])}",
         event_type: "order.created",
         payload: %{"immutable" => true}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{name: "Manual retry", url: "https://endpoint.invalid/webhook"})
+      Webhooks.create_endpoint(legacy_project(), %{
+        name: "Manual retry",
+        url: "https://endpoint.invalid/webhook"
+      })
 
     {:ok, delivery} = Webhooks.create_delivery(event, endpoint)
 

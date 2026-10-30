@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
   use ExUnit.Case, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   import Ecto.Query, only: [from: 2]
 
@@ -106,7 +107,7 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
       assert requests_for(fixtures) == [request]
       assert request.outcome == "accepted"
       assert_single_transition(winner)
-      assert Webhooks.get_delivery(loser.delivery.id) == loser.delivery
+      assert Webhooks.get_delivery_internal(loser.delivery.id) == loser.delivery
       assert jobs_for([loser]) == []
       assert_history_unchanged(loser)
       assert length(jobs_for(fixtures)) == 1
@@ -173,7 +174,7 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
       assert accepted.resulting_retry_cycle == 3
       assert rejected.observed_retry_cycle == 3
       assert rejected.resulting_retry_cycle == nil
-      assert Webhooks.get_delivery(fixture.delivery.id).retry_cycle == 3
+      assert Webhooks.get_delivery_internal(fixture.delivery.id).retry_cycle == 3
       assert Enum.all?(requests_for([fixture]), &(&1.resulting_retry_cycle in [nil, 3]))
       assert [%{args: %{"retry_cycle" => 3, "attempt_number" => 19}}] = jobs_for([fixture])
     end)
@@ -309,7 +310,7 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
 
   defp assert_single_transition(fixture) do
     delivery = fixture.delivery
-    pending = Webhooks.get_delivery(delivery.id)
+    pending = Webhooks.get_delivery_internal(delivery.id)
     assert pending.status == "pending"
     assert pending.retry_cycle == delivery.retry_cycle + 1
     assert pending.cycle_attempt_count == 0
@@ -334,8 +335,8 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
 
   defp assert_history_unchanged(fixture) do
     assert Webhooks.list_attempts(fixture.delivery) == fixture.attempts
-    assert Webhooks.get_event(fixture.event.id) == fixture.event
-    assert Webhooks.get_endpoint(fixture.endpoint.id) == fixture.endpoint
+    assert Webhooks.get_event(legacy_project(), fixture.event.id) == fixture.event
+    assert Webhooks.get_endpoint(legacy_project(), fixture.endpoint.id) == fixture.endpoint
   end
 
   defp requests_for(fixtures) do
@@ -367,14 +368,14 @@ defmodule Tidewake.Webhooks.ManualRetryConcurrencyTest do
 
   defp delivery_fixture(cycle) do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: Ecto.UUID.generate(),
         event_type: "order.created",
         payload: %{"immutable" => true}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Concurrent retry",
         url: "https://endpoint.invalid/webhook"
       })

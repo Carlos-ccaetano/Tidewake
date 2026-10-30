@@ -1,5 +1,6 @@
 defmodule Tidewake.Workers.OutboundDeliveryPipelineTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
   use Oban.Testing, repo: Tidewake.Repo
 
   alias Tidewake.Webhooks
@@ -86,7 +87,7 @@ defmodule Tidewake.Workers.OutboundDeliveryPipelineTest do
     assert_receive {:resolved, "receiver.example"}
     assert_receive {:signed_request, ^expected_body, signature}
 
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "succeeded"
     assert finalized.attempt_count == 1
 
@@ -130,7 +131,7 @@ defmodule Tidewake.Workers.OutboundDeliveryPipelineTest do
     assert Repo.get!(Oban.Job, job.id).state == "completed"
     assert_receive {:resolved, "blocked.example"}
 
-    finalized = Webhooks.get_delivery(delivery.id)
+    finalized = Webhooks.get_delivery_internal(delivery.id)
     assert finalized.status == "failed"
     assert finalized.attempt_count == 1
 
@@ -164,14 +165,14 @@ defmodule Tidewake.Workers.OutboundDeliveryPipelineTest do
 
   defp schedule_delivery(external_id, payload, endpoint_url) do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: external_id,
         event_type: "payment.created",
         payload: payload
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Outbound pipeline #{external_id}",
         url: endpoint_url
       })

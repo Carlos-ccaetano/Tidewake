@@ -1,5 +1,6 @@
 defmodule TidewakeWeb.EndpointControllerTest do
   use TidewakeWeb.ConnCase, async: true
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Tidewake.Webhooks
 
@@ -15,7 +16,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
       conn = post(conn, ~p"/api/endpoints", valid_attrs())
 
       assert %{"data" => data} = json_response(conn, 201)
-      endpoint = Webhooks.get_endpoint(data["id"])
+      endpoint = Webhooks.get_endpoint(legacy_project(), data["id"])
 
       assert get_resp_header(conn, "location") == [~p"/api/endpoints/#{data["id"]}"]
       assert_endpoint_data(data, endpoint)
@@ -104,7 +105,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
       assert %{"data" => data} = json_response(conn, 200)
       assert data["name"] == "Primary Ironhold"
-      assert Webhooks.get_endpoint(endpoint.id).name == "Primary Ironhold"
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id).name == "Primary Ironhold"
     end
 
     test "updates the URL", %{conn: conn} do
@@ -115,7 +116,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
       assert %{"data" => data} = json_response(conn, 200)
       assert data["url"] == updated_url
-      assert Webhooks.get_endpoint(endpoint.id).url == updated_url
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id).url == updated_url
     end
 
     test "deactivates an endpoint", %{conn: conn} do
@@ -124,7 +125,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
       conn = patch(conn, ~p"/api/endpoints/#{endpoint.id}", %{active: false})
 
       assert %{"data" => %{"active" => false}} = json_response(conn, 200)
-      refute Webhooks.get_endpoint(endpoint.id).active
+      refute Webhooks.get_endpoint(legacy_project(), endpoint.id).active
     end
 
     test "returns validation errors without persisting an invalid update", %{conn: conn} do
@@ -135,7 +136,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
       assert %{"errors" => %{"url" => ["must be a valid HTTP or HTTPS URL"]}} =
                json_response(conn, 422)
 
-      assert Webhooks.get_endpoint(endpoint.id).url == endpoint.url
+      assert Webhooks.get_endpoint(legacy_project(), endpoint.id).url == endpoint.url
     end
 
     test "returns not found for an unknown endpoint", %{conn: conn} do
@@ -173,7 +174,7 @@ defmodule TidewakeWeb.EndpointControllerTest do
 
   defp endpoint_fixture(attrs \\ %{}) do
     attrs = Map.merge(valid_attrs(), attrs)
-    {:ok, endpoint} = Webhooks.create_endpoint(attrs)
+    {:ok, endpoint} = Webhooks.create_endpoint(legacy_project(), attrs)
     endpoint
   end
 

@@ -7,6 +7,7 @@ defmodule Tidewake.Webhooks.Event do
   @string_column_max_length 255
 
   schema "events" do
+    belongs_to :project, Tidewake.Projects.Project
     field :external_id, :string
     field :event_type, :string
     field :payload, :map
@@ -17,12 +18,13 @@ defmodule Tidewake.Webhooks.Event do
   def changeset(event, attrs) do
     event
     |> cast(attrs, @fields)
-    |> validate_required(@fields)
+    |> validate_required([:project_id | @fields])
+    |> foreign_key_constraint(:project_id, name: :events_project_id_fkey)
     |> validate_non_blank(:external_id)
     |> validate_non_blank(:event_type)
     |> validate_length(:external_id, max: @string_column_max_length)
     |> validate_length(:event_type, max: @string_column_max_length)
-    |> unique_constraint(:external_id)
+    |> unique_constraint(:external_id, name: :events_project_id_external_id_index)
   end
 
   defp validate_non_blank(changeset, field) do
