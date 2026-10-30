@@ -214,7 +214,7 @@ defmodule Tidewake.Webhooks do
       case prior_manual_retry(actor, prepared.idempotency_key_digest) do
         nil when mode == :replay_only -> Repo.rollback(:persistence_error)
         nil -> record_manual_retry(delivery, endpoint, actor, prepared, requested_at)
-        request -> replay_manual_retry(request, prepared.request_fingerprint)
+        request -> replay_manual_retry(request, prepared)
       end
     end)
   end
@@ -228,8 +228,8 @@ defmodule Tidewake.Webhooks do
     )
   end
 
-  defp replay_manual_retry(request, fingerprint) do
-    if ManualRetryIdempotency.same_fingerprint?(request.request_fingerprint, fingerprint),
+  defp replay_manual_retry(request, prepared) do
+    if ManualRetryIdempotency.same_request?(request, prepared),
       do: %{request: request, replayed?: true},
       else: Repo.rollback(:idempotency_conflict)
   end
@@ -244,7 +244,8 @@ defmodule Tidewake.Webhooks do
       actor_subject: actor.subject,
       source: actor.source,
       idempotency_key_digest: prepared.idempotency_key_digest,
-      request_fingerprint: prepared.request_fingerprint
+      request_fingerprint: prepared.request_fingerprint,
+      request_fingerprint_version: prepared.request_fingerprint_version
     }
 
     changeset =
