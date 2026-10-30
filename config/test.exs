@@ -1,5 +1,9 @@
 import Config
 
+config :tidewake,
+       :service_account_token_pepper,
+       "test-only-service-account-pepper-not-for-production"
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used
