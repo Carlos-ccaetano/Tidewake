@@ -23,13 +23,15 @@ config :tidewake, Oban,
 # Configure the endpoint
 config :tidewake, TidewakeWeb.Endpoint,
   url: [host: "localhost"],
-  adapter: Bandit.PhoenixAdapter,
+  adapter: TidewakeWeb.HTTPAdapter,
   render_errors: [
     formats: [html: TidewakeWeb.ErrorHTML, json: TidewakeWeb.ErrorJSON],
     layout: false
   ],
   pubsub_server: Tidewake.PubSub,
   live_view: [signing_salt: "11dF7NyX"]
+
+config :plug_cowboy, conn_in_exception_metadata: false
 
 # Configure LiveView
 config :phoenix_live_view,
