@@ -211,7 +211,7 @@ defmodule TidewakeWeb.Plugs.RequireServiceAccountTest do
           conn(:post, "/boundary", %{"token" => issued.token}),
           conn(:get, "/boundary") |> put_req_header("cookie", "token=#{issued.token}"),
           conn(:get, "/boundary") |> put_req_header("x-api-key", issued.token),
-          authorized_conn(Application.fetch_env!(:tidewake, :api_token))
+          authorized_conn("dev-only-api-token-not-for-production")
         ] do
       result = run_pipeline(input)
       assert_failure_response(result)
@@ -315,6 +315,7 @@ defmodule TidewakeWeb.Plugs.RequireServiceAccountTest do
   defp assert_failure_response(conn) do
     assert conn.halted
     assert conn.status == 401
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
     assert Jason.decode!(conn.resp_body) == @unauthorized
     assert get_resp_header(conn, "www-authenticate") == ["Bearer"]
     assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]

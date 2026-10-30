@@ -4,18 +4,18 @@ defmodule TidewakeWeb.EventController do
   alias Tidewake.Webhooks
 
   def show(conn, %{"id" => id}) do
-    case fetch_event(conn.assigns.current_project, id) do
+    case fetch_event(conn.assigns.current_scope, id) do
       {:ok, event} -> json(conn, %{data: event_data(event)})
       :error -> not_found(conn)
     end
   end
 
   def deliveries(conn, %{"id" => id}) do
-    case fetch_event(conn.assigns.current_project, id) do
+    case fetch_event(conn.assigns.current_scope, id) do
       {:ok, event} ->
         deliveries =
           Enum.map(
-            Webhooks.list_deliveries_for_event(conn.assigns.current_project, event),
+            Webhooks.list_deliveries_for_event(conn.assigns.current_scope, event),
             &delivery_data/1
           )
 
@@ -33,7 +33,7 @@ defmodule TidewakeWeb.EventController do
       payload: params["data"]
     }
 
-    case Webhooks.ingest_event(conn.assigns.current_project, attrs) do
+    case Webhooks.ingest_event(conn.assigns.current_scope, attrs) do
       {:ok, %{event: event, deliveries: _deliveries, jobs: _jobs}} ->
         conn
         |> put_status(:created)

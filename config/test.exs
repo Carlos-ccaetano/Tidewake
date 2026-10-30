@@ -11,7 +11,6 @@ config :tidewake,
 # Run `mix help test` for more information.
 database_port = String.to_integer(System.get_env("POSTGRES_PORT", "5432"))
 
-config :tidewake, :api_token, "test-only-api-token-not-for-production"
 config :tidewake, :webhook_signing_secret, "tidewake_test_secret_not_for_production"
 
 config :tidewake, Tidewake.Repo,

@@ -11,10 +11,6 @@ config :tidewake,
 database_port = String.to_integer(System.get_env("POSTGRES_PORT", "5432"))
 
 config :tidewake,
-       :api_token,
-       System.get_env("TIDEWAKE_API_TOKEN", "dev-only-api-token-not-for-production")
-
-config :tidewake,
        :webhook_signing_secret,
        System.get_env(
          "TIDEWAKE_WEBHOOK_SIGNING_SECRET",
