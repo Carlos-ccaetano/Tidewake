@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
   use ExUnit.Case, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   import Ecto.Query, only: [from: 2]
 
@@ -90,7 +91,7 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
       assert request.outcome == "rejected"
       assert request.reason == @reason
       assert request == Repo.get!(ManualRetryRequest, request.id)
-      assert Webhooks.get_delivery(delivery.id) == delivery
+      assert Webhooks.get_delivery_internal(delivery.id) == delivery
       assert Repo.all(Oban.Job) == []
       assert_completed("rejected", @reason)
     end
@@ -195,7 +196,7 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
 
         assert_completed("error", "persistence")
         assert persisted_state() == before_failure
-        assert Webhooks.get_delivery(delivery.id) == delivery
+        assert Webhooks.get_delivery_internal(delivery.id) == delivery
       after
         Repo.query!("ALTER TABLE #{@failure_table} DROP CONSTRAINT #{constraint}")
       end
@@ -304,7 +305,7 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
       Task.Supervisor.async_nolink(supervisor, fn ->
         Sandbox.unboxed_run(Repo, fn ->
           %{
-            status: Webhooks.get_delivery(delivery_id).status,
+            status: Webhooks.get_delivery_internal(delivery_id).status,
             outcomes:
               Repo.all(
                 from(request in ManualRetryRequest,
@@ -365,7 +366,7 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
     cycle = Map.get(attrs, :retry_cycle, 0)
 
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: Ecto.UUID.generate(),
         event_type: "order.created",
         payload: %{
@@ -375,7 +376,7 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "private-endpoint",
         url: "https://endpoint.invalid/webhook?token=private-endpoint"
       })
@@ -398,7 +399,9 @@ defmodule Tidewake.Webhooks.ManualRetryTelemetryTest do
     end
 
     {:ok, _endpoint} =
-      Webhooks.update_endpoint(endpoint, %{active: Map.get(attrs, :endpoint_active, true)})
+      Webhooks.update_endpoint(legacy_project(), endpoint, %{
+        active: Map.get(attrs, :endpoint_active, true)
+      })
 
     delivery
     |> Delivery.changeset(%{

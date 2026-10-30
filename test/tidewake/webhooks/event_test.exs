@@ -19,7 +19,7 @@ defmodule Tidewake.Webhooks.EventTest do
       payload = %{"order_id" => "123", "items" => [%{"sku" => "ABC", "quantity" => 2}]}
 
       changeset =
-        Event.changeset(%Event{}, %{
+        Event.changeset(%Event{project_id: 1}, %{
           external_id: "evt_123",
           event_type: "order.created",
           payload: payload
@@ -31,7 +31,7 @@ defmodule Tidewake.Webhooks.EventTest do
 
     test "casts only external_id, event_type, and payload" do
       changeset =
-        Event.changeset(%Event{}, %{
+        Event.changeset(%Event{project_id: 1}, %{
           external_id: "evt_123",
           event_type: "order.created",
           payload: %{},
@@ -99,7 +99,7 @@ defmodule Tidewake.Webhooks.EventTest do
 
       assert Enum.any?(changeset.constraints, fn constraint ->
                constraint.type == :unique and constraint.field == :external_id and
-                 constraint.constraint == "events_external_id_index"
+                 constraint.constraint == "events_project_id_external_id_index"
              end)
     end
   end
@@ -111,6 +111,6 @@ defmodule Tidewake.Webhooks.EventTest do
       payload: %{"order_id" => "123"}
     }
 
-    Event.changeset(%Event{}, Map.merge(attrs, overrides))
+    Event.changeset(%Event{project_id: 1}, Map.merge(attrs, overrides))
   end
 end

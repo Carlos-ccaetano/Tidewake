@@ -1,5 +1,6 @@
 defmodule TidewakeWeb.EventControllerTest do
   use TidewakeWeb.ConnCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Tidewake.{Repo, Webhooks}
 
@@ -21,7 +22,7 @@ defmodule TidewakeWeb.EventControllerTest do
         conn = post(conn, ~p"/api/events", valid_params(%{data: payload}))
 
         assert %{"data" => data} = response = json_response(conn, 201)
-        event = Webhooks.get_event(data["id"])
+        event = Webhooks.get_event(legacy_project(), data["id"])
 
         assert response == %{"data" => event_data(event)}
         assert event.event_type == "order.created"
@@ -78,7 +79,7 @@ defmodule TidewakeWeb.EventControllerTest do
         _endpoint = endpoint_fixture()
 
         assert {:ok, %{event: original_event}} =
-                 Webhooks.ingest_event(%{
+                 Webhooks.ingest_event(legacy_project(), %{
                    external_id: "evt_123",
                    event_type: "order.created",
                    payload: %{"order_id" => "123"}
@@ -96,7 +97,7 @@ defmodule TidewakeWeb.EventControllerTest do
 
         assert fanout_record_counts() == counts_before_conflict
         assert counts_before_conflict == %{events: 1, deliveries: 1, jobs: 1}
-        assert Webhooks.get_event_by_external_id("evt_123") == original_event
+        assert Webhooks.get_event_by_external_id(legacy_project(), "evt_123") == original_event
       end)
     end
 
@@ -238,7 +239,7 @@ defmodule TidewakeWeb.EventControllerTest do
       refute Map.has_key?(hd(data), "attempts")
       assert hd(data)["completed_at"] == "2026-09-17T10:00:00.015000Z"
       assert List.last(data)["completed_at"] == nil
-      assert Webhooks.list_deliveries_for_event(event) == deliveries_before
+      assert Webhooks.list_deliveries_for_event(legacy_project(), event) == deliveries_before
       assert Repo.aggregate(Oban.Job, :count) == job_count_before
       assert Repo.aggregate(Tidewake.Webhooks.Attempt, :count) == attempt_count_before
       assert Webhooks.get_attempt(attempt.id) == attempt
@@ -290,7 +291,7 @@ defmodule TidewakeWeb.EventControllerTest do
         attrs
       )
 
-    {:ok, event} = Webhooks.create_event(attrs)
+    {:ok, event} = Webhooks.create_event(legacy_project(), attrs)
     event
   end
 
@@ -301,7 +302,7 @@ defmodule TidewakeWeb.EventControllerTest do
         attrs
       )
 
-    {:ok, endpoint} = Webhooks.create_endpoint(attrs)
+    {:ok, endpoint} = Webhooks.create_endpoint(legacy_project(), attrs)
     endpoint
   end
 

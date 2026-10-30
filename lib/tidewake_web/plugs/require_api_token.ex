@@ -7,6 +7,9 @@ defmodule TidewakeWeb.Plugs.RequireApiToken do
 
   import Plug.Conn
 
+  alias Tidewake.Projects
+  alias Tidewake.Projects.Project
+
   @unauthorized_body Jason.encode!(%{
                        error: %{
                          code: "unauthorized",
@@ -20,14 +23,32 @@ defmodule TidewakeWeb.Plugs.RequireApiToken do
   @impl Plug
   def call(conn, _options) do
     expected_token = Application.fetch_env!(:tidewake, :api_token)
+    conn = %{conn | assigns: Map.delete(conn.assigns, :current_project)}
 
     with [authorization_header] <- get_req_header(conn, "authorization"),
          {:ok, presented_token} <- extract_bearer_token(authorization_header),
-         true <- matching_token?(presented_token, expected_token) do
-      conn
+         true <- matching_token?(presented_token, expected_token),
+         %Project{} = project <- legacy_project() do
+      assign(conn, :current_project, project)
     else
       _error -> unauthorized(conn)
     end
+  end
+
+  defp legacy_project do
+    case Projects.get_project_by_slug("legacy") do
+      %Project{
+        id: 1,
+        public_id: "00000000-0000-4000-8000-000000000001",
+        status: "active"
+      } = project ->
+        project
+
+      _invalid ->
+        nil
+    end
+  rescue
+    _failure -> nil
   end
 
   defp extract_bearer_token("Bearer " <> token) when byte_size(token) > 0 do

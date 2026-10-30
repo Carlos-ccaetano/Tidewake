@@ -5,7 +5,8 @@ defmodule Tidewake.Webhooks do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Ecto.Multi
+  alias Ecto.{Changeset, Multi}
+  alias Tidewake.Projects.{Project, Scope}
   alias Tidewake.Repo
   alias Tidewake.Webhooks.{Attempt, Delivery, Endpoint, Event}
 
@@ -23,6 +24,7 @@ defmodule Tidewake.Webhooks do
   @manual_retry_completed [:tidewake, :webhooks, :manual_retry, :completed]
   @manual_retry_rejection_reasons ~w(state_not_failed endpoint_inactive manual_cycle_limit_reached)
   @max_stale_delivery_batch_size 100
+  @repo_opts [log: false, telemetry_event: nil]
   @attempt_identity_keys [
     :delivery_id,
     "delivery_id",
@@ -32,34 +34,36 @@ defmodule Tidewake.Webhooks do
     "cycle_attempt_number"
   ]
 
-  def create_event(attrs) do
-    %Event{}
+  def create_event(project, attrs) do
+    %Event{project_id: project_id!(project)}
     |> Event.changeset(attrs)
-    |> Repo.insert()
+    |> Repo.insert(@repo_opts)
   end
 
-  def ingest_event(attrs) do
+  def ingest_event(project, attrs) do
+    project_id = project_id!(project)
+
     Multi.new()
-    |> Multi.insert(:event, Event.changeset(%Event{}, attrs))
-    |> Multi.all(:endpoints, active_endpoints_query())
+    |> Multi.insert(:event, Event.changeset(%Event{project_id: project_id}, attrs), @repo_opts)
+    |> Multi.all(:endpoints, active_endpoints_query(project_id), @repo_opts)
     |> Multi.merge(&fanout_multi/1)
-    |> Repo.transaction()
+    |> Repo.transaction(@repo_opts)
     |> normalize_ingest_result()
     |> emit_ingest_telemetry()
   end
 
-  def get_event(id) do
-    Repo.get(Event, id)
+  def get_event(project, id) do
+    Repo.get_by(Event, [id: id, project_id: project_id!(project)], @repo_opts)
   end
 
-  def get_event_by_external_id(external_id) do
-    Repo.get_by(Event, external_id: external_id)
+  def get_event_by_external_id(project, external_id) do
+    Repo.get_by(Event, [external_id: external_id, project_id: project_id!(project)], @repo_opts)
   end
 
   def create_delivery(%Event{} = event, %Endpoint{active: true} = endpoint) do
     event
     |> delivery_changeset(endpoint)
-    |> Repo.insert()
+    |> Repo.insert(@repo_opts)
   end
 
   def create_delivery(%Event{}, %Endpoint{active: false}) do
@@ -75,7 +79,12 @@ defmodule Tidewake.Webhooks do
     |> Repo.transaction()
   end
 
-  def get_delivery(id) do
+  def get_delivery(project, id) do
+    Repo.get_by(Delivery, [id: id, project_id: project_id!(project)], @repo_opts)
+  end
+
+  @doc "Internal ID lookup for persisted work; never an HTTP access boundary."
+  def get_delivery_internal(id) do
     Repo.get(Delivery, id)
   end
 
@@ -330,12 +339,14 @@ defmodule Tidewake.Webhooks do
 
   def list_stale_delivery_ids(_stale_before, _limit), do: {:error, :invalid_arguments}
 
-  def list_deliveries_for_event(%Event{} = event) do
+  def list_deliveries_for_event(project, %Event{} = event) do
+    project_id = project_id!(project)
+
     from(delivery in Delivery,
-      where: delivery.event_id == ^event.id,
+      where: delivery.event_id == ^event.id and delivery.project_id == ^project_id,
       order_by: [asc: delivery.id]
     )
-    |> Repo.all()
+    |> Repo.all(@repo_opts)
   end
 
   def get_delivery_by_event_and_endpoint(%Event{} = event, %Endpoint{} = endpoint) do
@@ -498,38 +509,67 @@ defmodule Tidewake.Webhooks do
     |> Repo.all()
   end
 
-  def list_endpoints do
-    Repo.all(Endpoint)
+  def list_endpoints(project) do
+    project_id = project_id!(project)
+    Repo.all(from(endpoint in Endpoint, where: endpoint.project_id == ^project_id), @repo_opts)
   end
 
-  def list_active_endpoints do
-    active_endpoints_query()
-    |> Repo.all()
+  def list_active_endpoints(project) do
+    project |> project_id!() |> active_endpoints_query() |> Repo.all(@repo_opts)
   end
 
-  def get_endpoint(id) do
-    Repo.get(Endpoint, id)
+  def get_endpoint(project, id) do
+    Repo.get_by(Endpoint, [id: id, project_id: project_id!(project)], @repo_opts)
   end
 
-  def create_endpoint(attrs \\ %{}) do
-    %Endpoint{}
+  def create_endpoint(project, attrs \\ %{}) do
+    %Endpoint{project_id: project_id!(project)}
     |> Endpoint.changeset(attrs)
-    |> Repo.insert()
+    |> Repo.insert(@repo_opts)
   end
 
-  def update_endpoint(%Endpoint{} = endpoint, attrs) do
-    endpoint
-    |> Endpoint.changeset(attrs)
-    |> Repo.update()
+  def update_endpoint(project, %Endpoint{id: id}, attrs) do
+    case get_endpoint(project, id) do
+      nil ->
+        {:error, :not_found}
+
+      endpoint ->
+        endpoint
+        |> Endpoint.changeset(attrs)
+        # Match immutable ownership in UPDATE as well as the preceding lookup.
+        |> Changeset.optimistic_lock(:project_id, &Function.identity/1)
+        |> Repo.update(@repo_opts)
+    end
   end
 
-  def change_endpoint(%Endpoint{} = endpoint, attrs \\ %{}) do
-    Endpoint.changeset(endpoint, attrs)
+  def delete_endpoint(project, %Endpoint{id: id}) do
+    case get_endpoint(project, id) do
+      nil ->
+        {:error, :not_found}
+
+      endpoint ->
+        endpoint
+        |> Changeset.change()
+        |> Changeset.foreign_key_constraint(:id, name: :deliveries_endpoint_id_fkey)
+        |> Changeset.optimistic_lock(:project_id, &Function.identity/1)
+        |> Repo.delete(@repo_opts)
+    end
   end
 
-  defp active_endpoints_query do
+  def change_endpoint(project, %Endpoint{id: id}, attrs \\ %{}) do
+    case get_endpoint(project, id) do
+      nil -> {:error, :not_found}
+      endpoint -> Endpoint.changeset(endpoint, attrs)
+    end
+  end
+
+  defp project_id!(%Project{id: id, status: "active"}) when is_integer(id) and id > 0, do: id
+  defp project_id!(%Scope{project_id: id}) when is_integer(id) and id > 0, do: id
+  defp project_id!(_context), do: raise(ArgumentError, "Trusted project context required")
+
+  defp active_endpoints_query(project_id) do
     from(endpoint in Endpoint,
-      where: endpoint.active == true,
+      where: endpoint.project_id == ^project_id and endpoint.active == true,
       order_by: [asc: endpoint.id]
     )
   end
@@ -540,7 +580,7 @@ defmodule Tidewake.Webhooks do
       job_operation = {:job, endpoint.id}
 
       multi
-      |> Multi.insert(delivery_operation, delivery_changeset(event, endpoint))
+      |> Multi.insert(delivery_operation, delivery_changeset(event, endpoint), @repo_opts)
       |> Oban.insert(job_operation, fn changes ->
         changes
         |> Map.fetch!(delivery_operation)
@@ -596,7 +636,10 @@ defmodule Tidewake.Webhooks do
   defp external_id_conflict?(_error), do: false
 
   defp delivery_changeset(%Event{} = event, %Endpoint{} = endpoint) do
-    Delivery.changeset(%Delivery{event_id: event.id, endpoint_id: endpoint.id}, %{})
+    Delivery.changeset(
+      %Delivery{project_id: event.project_id, event_id: event.id, endpoint_id: endpoint.id},
+      %{}
+    )
   end
 
   defp new_delivery_job(delivery) do

@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.AttemptTest do
   use Tidewake.DataCase, async: true
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Tidewake.Webhooks
   alias Tidewake.Webhooks.{Attempt, Delivery, RetryPolicy}
@@ -489,14 +490,14 @@ defmodule Tidewake.Webhooks.AttemptTest do
 
   defp delivery_fixture do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_attempt_next_attempt_at",
         event_type: "order.created",
         payload: %{"order" => %{"id" => "123"}}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Attempt audit endpoint",
         url: "https://endpoint.invalid/webhooks"
       })

@@ -1,9 +1,10 @@
 defmodule TidewakeWeb.Plugs.RequireApiTokenTest do
-  use ExUnit.Case, async: false
+  use Tidewake.DataCase, async: false
 
   import Plug.Conn
   import Plug.Test
 
+  alias Tidewake.Projects.Project
   alias TidewakeWeb.Plugs.RequireApiToken
 
   @api_token "test-only-require-api-token-value"
@@ -22,16 +23,32 @@ defmodule TidewakeWeb.Plugs.RequireApiTokenTest do
     assert RequireApiToken.init(options) == options
   end
 
-  test "allows a connection with the configured bearer token unchanged" do
+  test "binds the configured bearer token to the persisted legacy project" do
     conn = conn(:get, "/api") |> put_req_header("authorization", "Bearer #{@api_token}")
 
-    assert RequireApiToken.call(conn, []) == conn
+    project = Tidewake.Projects.get_project_by_slug("legacy")
+    assert RequireApiToken.call(conn, []) == assign(conn, :current_project, project)
   end
 
   test "rejects a missing authorization header" do
     conn = conn(:get, "/api") |> RequireApiToken.call([])
 
     assert_unauthorized(conn)
+  end
+
+  test "a missing recorded legacy identity rejects even a preassigned project" do
+    Repo.update_all(from(project in Project, where: project.id == 1),
+      set: [slug: "unavailable-legacy"]
+    )
+
+    result =
+      conn(:get, "/api")
+      |> put_req_header("authorization", "Bearer #{@api_token}")
+      |> assign(:current_project, %Project{id: 1, status: "active"})
+      |> RequireApiToken.call([])
+
+    assert_unauthorized(result)
+    refute Map.has_key?(result.assigns, :current_project)
   end
 
   test "rejects an incorrect token" do

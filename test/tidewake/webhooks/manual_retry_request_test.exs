@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.ManualRetryRequestTest do
   use Tidewake.DataCase, async: true
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Tidewake.Webhooks
   alias Tidewake.Webhooks.{Delivery, ManualRetryRequest}
@@ -495,19 +496,20 @@ defmodule Tidewake.Webhooks.ManualRetryRequestTest do
 
   defp delivery_fixture do
     {:ok, event} =
-      Webhooks.create_event(%{
+      Webhooks.create_event(legacy_project(), %{
         external_id: "evt_manual_retry_schema_#{System.unique_integer([:positive])}",
         event_type: "order.created",
         payload: %{}
       })
 
     {:ok, endpoint} =
-      Webhooks.create_endpoint(%{
+      Webhooks.create_endpoint(legacy_project(), %{
         name: "Audit schema validation",
         url: "https://endpoint.invalid/webhooks"
       })
 
     Repo.insert!(%Delivery{
+      project_id: event.project_id,
       event_id: event.id,
       endpoint_id: endpoint.id,
       status: "failed",

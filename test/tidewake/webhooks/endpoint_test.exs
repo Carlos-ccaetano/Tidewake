@@ -6,7 +6,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
   describe "changeset/2" do
     test "accepts a valid endpoint" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -16,7 +16,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "defaults active to true" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -26,7 +26,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "accepts active false without applying the default" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com/api/webhooks",
           active: false
@@ -38,7 +38,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects an invalid active value and exposes the field error" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com/api/webhooks",
           active: "not-a-boolean"
@@ -50,14 +50,16 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "requires a name" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{url: "https://ironhold.example.com/api/webhooks"})
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
+          url: "https://ironhold.example.com/api/webhooks"
+        })
 
       assert "can't be blank" in errors_on(changeset).name
     end
 
     test "rejects an empty name" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "",
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -67,7 +69,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a name containing only whitespace" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "   ",
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -77,7 +79,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "accepts a name with exactly 255 characters" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: String.duplicate("a", 255),
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -87,7 +89,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a name with 256 characters and exposes the field error" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: String.duplicate("a", 256),
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -97,14 +99,14 @@ defmodule Tidewake.Webhooks.EndpointTest do
     end
 
     test "requires a URL" do
-      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold"})
+      changeset = Endpoint.changeset(%Endpoint{project_id: 1}, %{name: "Ironhold"})
 
       assert "can't be blank" in errors_on(changeset).url
     end
 
     test "accepts an HTTP URL" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Local consumer",
           url: "http://localhost:4001/api/webhooks"
         })
@@ -114,7 +116,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "accepts an HTTPS URL" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com/api/webhooks"
         })
@@ -124,7 +126,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "accepts a valid hostname with a port and query string" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://ironhold.example.com:8443/api/webhooks?tenant=acme&mode=full"
         })
@@ -136,7 +138,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
       base_url = "https://example.com/"
       url = base_url <> String.duplicate("a", 2_048 - byte_size(base_url))
 
-      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+      changeset = Endpoint.changeset(%Endpoint{project_id: 1}, %{name: "Ironhold", url: url})
 
       assert byte_size(url) == 2_048
       assert changeset.valid?
@@ -146,7 +148,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
       base_url = "https://example.com/"
       url = base_url <> String.duplicate("a", 2_049 - byte_size(base_url))
 
-      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+      changeset = Endpoint.changeset(%Endpoint{project_id: 1}, %{name: "Ironhold", url: url})
 
       assert byte_size(url) == 2_049
       assert "must be at most 2048 bytes" in errors_on(changeset).url
@@ -156,7 +158,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
       base_url = "https://example.com/"
       url = base_url <> String.duplicate("é", 1_014) <> "a"
 
-      changeset = Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: url})
+      changeset = Endpoint.changeset(%Endpoint{project_id: 1}, %{name: "Ironhold", url: url})
 
       assert String.length(url) < 2_048
       assert byte_size(url) == 2_049
@@ -165,7 +167,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a URL containing userinfo credentials" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://user:password@example.com/webhooks"
         })
@@ -175,7 +177,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a URL containing a fragment" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "https://example.com/webhooks#internal"
         })
@@ -185,7 +187,7 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a URL without a scheme" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "ironhold.example.com/api/webhooks"
         })
@@ -195,14 +197,17 @@ defmodule Tidewake.Webhooks.EndpointTest do
 
     test "rejects a URL without a host" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{name: "Ironhold", url: "https:///api/webhooks"})
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
+          name: "Ironhold",
+          url: "https:///api/webhooks"
+        })
 
       assert "must be a valid HTTP or HTTPS URL" in errors_on(changeset).url
     end
 
     test "rejects a URL with an unsupported scheme" do
       changeset =
-        Endpoint.changeset(%Endpoint{}, %{
+        Endpoint.changeset(%Endpoint{project_id: 1}, %{
           name: "Ironhold",
           url: "ftp://ironhold.example.com/webhooks"
         })

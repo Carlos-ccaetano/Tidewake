@@ -1,5 +1,6 @@
 defmodule Tidewake.Webhooks.TelemetryTest do
   use Tidewake.DataCase, async: false
+  import Tidewake.WebhooksFixtures, only: [legacy_project: 0]
 
   alias Ecto.Changeset
   alias Tidewake.Webhooks
@@ -31,15 +32,15 @@ defmodule Tidewake.Webhooks.TelemetryTest do
           })
 
         assert {:ok, %{event: event, deliveries: deliveries, jobs: jobs}} =
-                 Webhooks.ingest_event(attrs)
+                 Webhooks.ingest_event(legacy_project(), attrs)
 
         assert_received {:telemetry_event, @event_ingested,
                          %{count: 1, delivery_count: 2} = measurements, %{}}
 
-        assert Webhooks.get_event(event.id) == event
+        assert Webhooks.get_event(legacy_project(), event.id) == event
         assert length(deliveries) == 2
         assert length(jobs) == 2
-        assert Enum.all?(deliveries, &(Webhooks.get_delivery(&1.id) == &1))
+        assert Enum.all?(deliveries, &(Webhooks.get_delivery_internal(&1.id) == &1))
         assert Repo.aggregate(Oban.Job, :count) == 2
 
         telemetry_data = inspect(measurements)
@@ -56,7 +57,7 @@ defmodule Tidewake.Webhooks.TelemetryTest do
 
       Oban.Testing.with_testing_mode(:manual, fn ->
         assert {:ok, %{deliveries: [], jobs: []}} =
-                 Webhooks.ingest_event(valid_event_attrs())
+                 Webhooks.ingest_event(legacy_project(), valid_event_attrs())
 
         assert_received {:telemetry_event, @event_ingested, %{count: 1, delivery_count: 0}, %{}}
       end)
@@ -66,7 +67,7 @@ defmodule Tidewake.Webhooks.TelemetryTest do
       attach_telemetry(@event_ingested)
       attach_telemetry(@event_rejected)
 
-      assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(%{})
+      assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(legacy_project(), %{})
 
       refute changeset.valid?
 
@@ -81,15 +82,17 @@ defmodule Tidewake.Webhooks.TelemetryTest do
     test "emits rejected with duplicate_external_id without another success event" do
       Oban.Testing.with_testing_mode(:manual, fn ->
         attrs = valid_event_attrs()
-        assert {:ok, original_result} = Webhooks.ingest_event(attrs)
+        assert {:ok, original_result} = Webhooks.ingest_event(legacy_project(), attrs)
 
         attach_telemetry(@event_ingested)
         attach_telemetry(@event_rejected)
 
-        assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(attrs)
+        assert {:error, %Changeset{} = changeset} = Webhooks.ingest_event(legacy_project(), attrs)
 
         refute changeset.valid?
-        assert Webhooks.get_event_by_external_id(attrs.external_id) == original_result.event
+
+        assert Webhooks.get_event_by_external_id(legacy_project(), attrs.external_id) ==
+                 original_result.event
 
         assert_received {:telemetry_event, @event_rejected, %{count: 1}, metadata}
         assert metadata == %{reason: "duplicate_external_id"}
@@ -111,7 +114,7 @@ defmodule Tidewake.Webhooks.TelemetryTest do
         """)
 
         assert_raise Ecto.ConstraintError, fn ->
-          Webhooks.ingest_event(valid_event_attrs())
+          Webhooks.ingest_event(legacy_project(), valid_event_attrs())
         end
 
         assert Repo.aggregate(Tidewake.Webhooks.Event, :count) == 0
@@ -149,7 +152,7 @@ defmodule Tidewake.Webhooks.TelemetryTest do
         attrs
       )
 
-    {:ok, endpoint} = Webhooks.create_endpoint(attrs)
+    {:ok, endpoint} = Webhooks.create_endpoint(legacy_project(), attrs)
     endpoint
   end
 

@@ -6,6 +6,7 @@ defmodule Tidewake.Webhooks.Endpoint do
   @max_url_bytes 2_048
 
   schema "endpoints" do
+    belongs_to :project, Tidewake.Projects.Project
     field :name, :string
     field :url, :string
     field :active, :boolean, default: true
@@ -16,7 +17,8 @@ defmodule Tidewake.Webhooks.Endpoint do
   def changeset(endpoint, attrs) do
     endpoint
     |> cast(attrs, [:name, :url, :active])
-    |> validate_required([:name, :url])
+    |> validate_required([:project_id, :name, :url])
+    |> foreign_key_constraint(:project_id, name: :endpoints_project_id_fkey)
     |> validate_non_blank_name()
     |> validate_length(:name, max: 255)
     |> validate_url_byte_length()
