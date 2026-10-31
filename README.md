@@ -1,51 +1,55 @@
 # Tidewake
 
-Tidewake is an early-stage platform for reliable webhook delivery. It is intended to accept events, persist them, schedule asynchronous deliveries, sign outbound requests, record every attempt, and make delivery history observable.
+[![CI](https://github.com/Carlos-ccaetano/Tidewake/actions/workflows/ci.yml/badge.svg)](https://github.com/Carlos-ccaetano/Tidewake/actions/workflows/ci.yml)
 
-The project is still early-stage, but it is no longer only a foundation. The Phoenix application, PostgreSQL integration, Oban infrastructure, local environment, quality tooling, and CI are present. Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint in its project, and one initial Oban job per delivery; `201 Created` acknowledges durable ingestion, not completed delivery. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record delivery outcomes and schedule bounded automatic retries for allowlisted transient failures. Periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, retries, cancellation, and recovery, and declarative domain metrics are available.
+A pre-release webhook delivery platform in Elixir/Phoenix, with durable ingestion, asynchronous fan-out, signed HTTP requests, and bounded retries.
 
-Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
+Webhook delivery must handle temporary endpoint failures without losing accepted work or mixing projects. Tidewake persists events and delivery jobs together, sends requests asynchronously, and records delivery outcomes and manual retry decisions.
 
-For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once per actual attempt, and signs those exact bytes with a fresh timestamp. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
+**Pre-release:** functional implementation with automated tests, not a proven production deployment. No customer use, SLA, or uptime is established. An operational UI and human authentication are not available.
 
-Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a project-bound service-account credential and an explicit route permission.
+**Core stack:** Elixir 1.19 · Erlang/OTP 28 · Phoenix 1.8 · PostgreSQL 16 · Oban · Req. ExUnit, Telemetry, and GitHub Actions provide testing, instrumentation, and CI.
 
-Automatic retries use explicit transient and permanent classifications, a six-attempt budget per cycle, bounded exponential backoff with equal jitter, guarded attempt-aware claims, and transactional successor scheduling.
+[Documentation](#documentation) · [Delivery design and evidence](#delivery-design-and-evidence) · [Local setup](#local-setup) · [Quality checks](#quality-checks) · [Ironhold](https://github.com/Carlos-ccaetano/Ironhold)
 
-The manual retry command requires an authenticated project Scope and current admin authority, including on replay. `Tidewake.Webhooks.request_manual_retry/3` uses project-bound version-2 fingerprints and digest-only actor-scoped idempotency. Acceptance atomically commits its audit record, delivery transition and immediate cycle-aware job; rejection records only its decision, and replay creates no additional work. PostgreSQL locks and uniqueness arbitrate concurrent requests. Lifetime attempt history is preserved, with at most three manual cycles after the original automatic cycle.
+## Current status
 
-Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The API contract](docs/api/manual-retries.md) documents POST and the admin-only GET on the same path. GET returns historical audit snapshots with id-descending cursor pagination (default 50, maximum 100), never consumes the POST bucket and uses the same non-disclosing 404 and no-store policy. Each cycle permits six automatic attempts; the initial cycle plus at most three manual cycles gives a theoretical maximum of 24, without resetting lifetime history. Retry UI, receiver `Retry-After` handling, audit retention/deletion and payload policy, human users, automated secret rotation, metrics reporting, external alerts and production deployment remain future work.
+### Implemented and tested
+
+- Durable event ingestion, PostgreSQL persistence, and transactional asynchronous fan-out with Oban.
+- HMAC-signed HTTP delivery with SSRF destination checks and bounded response consumption.
+- Bounded automatic retries with backoff and jitter, stale-delivery recovery, and delivery status reads.
+- Service-account authentication, project isolation, and explicit role/permission enforcement.
+- Authenticated admin manual retry, idempotent decisions, and paginated retry audit history.
+- Telemetry events and domain metrics; automated regression tests and CI checks.
+
+### Planned / not yet proven
+
+Operational UI and human authentication, receiver `Retry-After` handling, retention/disposal policy, an external metrics reporter, alerts, and automated secret rotation remain future work. Production deployment and operational validation are not established by local tests or CI.
+
+## Documentation
+
+- **Design:** [Architecture](docs/architecture.md) · [Roadmap](docs/roadmap.md)
+- **API:** [Authentication and credential lifecycle](docs/api/authentication.md) · [Events](docs/api/events.md) · [Endpoints](docs/api/endpoints.md) · [Manual retry and audit](docs/api/manual-retries.md)
+- **Operations and project:** [Migration/cutover and recovery rehearsal](docs/operations/migration-cutover.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
+
+## Delivery flow
+
+```text
+Client -> Tidewake API -> PostgreSQL -> Oban -> signed HTTP delivery -> Webhook endpoint
+```
+
+The API acknowledges durable ingestion before delivery runs. Recovery uses at-least-once semantics: a request may be sent again if its outcome was not persisted. Receiver-side idempotency remains necessary.
 
 ## Relationship with Ironhold
 
-Tidewake and Ironhold are separate systems and separate repositories. In the intended integration, Ironhold is one possible webhook consumer:
+Tidewake and [Ironhold](https://github.com/Carlos-ccaetano/Ironhold) are separate systems, repositories, and processes. In the intended integration, Ironhold is one possible webhook consumer:
 
     Client -> Tidewake -> signed webhook -> Ironhold
 
-This repository does not contain or modify Ironhold.
+This repository does not contain or modify Ironhold. The services run independently; no shared deployment or end-to-end production integration has been demonstrated.
 
 Each Tidewake attempt uses a fresh timestamp and signature. Ironhold acknowledges a freshly signed retry of an identical stored envelope with the same generic `202 Accepted` response, while exact signature reuse and conflicting content under the same event ID remain conflicts.
-
-## Planned architecture
-
-    Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
-
-Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in the authenticated project in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. The production adapter can deliver signed requests through the guarded Req transport when deployed and configured. Automatic retries already classify transient outcomes, apply bounded exponential backoff with equal jitter, reject stale or duplicate jobs during claim, and persist each failed attempt, pending delivery state, and successor job atomically. The broader architecture will eventually:
-
-- support delivery `Retry-After` where appropriate;
-- define retention and payload policy;
-- expose operational history through Phoenix LiveView;
-- publish the available domain metrics through a reporter;
-- emit structured logs, external alerts, and broader audit information;
-- provide production deployment and rollback guidance.
-
-See [architecture.md](docs/architecture.md) for boundaries and future entities.
-
-See the [migration/cutover checklist and local recovery rehearsal](docs/operations/migration-cutover.md) for rollout prerequisites, restore verification and current operational gaps.
-
-See the [endpoint management API contract](docs/api/endpoints.md) for the endpoint representation and operations.
-
-See the [event ingestion API contract](docs/api/events.md) for event creation, retrieval, validation, and idempotency behavior.
 
 ## Stack
 
@@ -61,6 +65,32 @@ See the [event ingestion API contract](docs/api/events.md) for event creation, r
 - GitHub Actions for continuous integration
 
 The exact resolved library versions are recorded in mix.lock.
+
+## Delivery design and evidence
+
+Implementation and regression coverage: [Webhooks context](lib/tidewake/webhooks.ex), [signed delivery pipeline](test/tidewake/workers/outbound_delivery_pipeline_test.exs), [project isolation](test/tidewake_web/controllers/api_isolation_regression_test.exs), and [manual retry security](test/tidewake_web/controllers/manual_retry_api_security_test.exs). These checks are evidence of tested behavior, not a production availability guarantee.
+
+### Ingestion and scheduling
+
+Endpoint management and immutable event ingestion are implemented. `POST /api/events` atomically persists an event, one pending delivery for every active endpoint in its project, and one initial Oban job per delivery; `201 Created` acknowledges durable ingestion, not completed delivery. With no active endpoints, the event is still accepted without deliveries or jobs. `GET /api/events/:id/deliveries` exposes the ordered status of that fan-out. A pending delivery is cancelled without an outbound request or recorded attempt if its endpoint is inactive when processing begins. The worker and processor record delivery outcomes and schedule bounded automatic retries for allowlisted transient failures. Periodic maintenance recovers abandoned processing work, bounded Telemetry events cover ingestion, processing, retries, cancellation, and recovery, and declarative domain metrics are available.
+
+### Stale-delivery recovery
+
+Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
+
+### Signed outbound delivery
+
+For an active delivery, the processor validates the configured signing secret before claiming the record, serializes the envelope once per actual attempt, and signs those exact bytes with a fresh timestamp. It prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` alongside `content-type: application/json`. The secret, signature, and signing timestamp are not persisted.
+
+Production configures the Req adapter with the system resolver and public-only destination policy. Each attempt validates the target again, resolves both IP families, rejects the complete destination when any answer is unsafe, and connects to one approved IP while retaining the original hostname for Host, SNI, and TLS verification. Redirects and Req retries are disabled, idle dynamic pools expire after 60 seconds, and at most 65,536 response bytes are consumed and discarded. Development and tests remain deterministic by default; development requires explicit flags to enable HTTP and to admit private-use or loopback targets, while other special-purpose ranges remain blocked. Every `/api` route requires a project-bound service-account credential and an explicit route permission.
+
+### Automatic and manual retries
+
+Automatic retries use explicit transient and permanent classifications, a six-attempt budget per cycle, bounded exponential backoff with equal jitter, guarded attempt-aware claims, and transactional successor scheduling.
+
+The manual retry command requires an authenticated project Scope and current admin authority, including on replay. `Tidewake.Webhooks.request_manual_retry/3` uses project-bound version-2 fingerprints and digest-only actor-scoped idempotency. Acceptance atomically commits its audit record, delivery transition and immediate cycle-aware job; rejection records only its decision, and replay creates no additional work. PostgreSQL locks and uniqueness arbitrate concurrent requests. Lifetime attempt history is preserved, with at most three manual cycles after the original automatic cycle.
+
+Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The API contract](docs/api/manual-retries.md) documents POST and the admin-only GET on the same path. GET returns historical audit snapshots with id-descending cursor pagination (default 50, maximum 100), never consumes the POST bucket and uses the same non-disclosing 404 and no-store policy. Each cycle permits six automatic attempts; the initial cycle plus at most three manual cycles gives a theoretical maximum of 24, without resetting lifetime history. Retry UI, receiver `Retry-After` handling, audit retention/deletion and payload policy, human users, automated secret rotation, metrics reporting, external alerts and production deployment remain future work.
 
 ## Requirements
 
