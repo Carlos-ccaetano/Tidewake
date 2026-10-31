@@ -2,9 +2,9 @@
 
 ## Status
 
-Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Every route under `/api`, including these event operations, requires the configured static API token. Accepted events are immutable, and a unique database index on `external_id` enforces idempotency, including for concurrent requests.
+Event ingestion and the HTTP operations to create and retrieve individual events and list their persisted delivery statuses are implemented. Every `/api` route requires a project-bound service-account credential and explicit permission. Accepted events are immutable, and a unique database index on `(project_id, external_id)` enforces idempotency within the authenticated project, including for concurrent requests.
 
-Ingestion atomically persists the event, one pending delivery for each active endpoint, and one initial job per delivery. It does not itself send a webhook. During delivery processing, the configured signing secret is validated before claim, the envelope is serialized once per attempt, and its exact bytes are signed. The processor prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` with `content-type: application/json` and passes the same body to the adapter. Every actual attempt receives a fresh timestamp and signature; the secret and signing material are not persisted.
+Ingestion atomically persists the event, one pending delivery for each active endpoint in its project, and one initial job per delivery. It does not itself send a webhook. During delivery processing, the configured signing secret is validated before claim, the envelope is serialized once per attempt, and its exact bytes are signed. The processor prepares `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` with `content-type: application/json` and passes the same body to the adapter. Every actual attempt receives a fresh timestamp and signature; the secret and signing material are not persisted.
 
 Development and tests use the deterministic adapter by default, while production uses Req with public-destination validation, pinned DNS resolution, redirects and Req retries disabled, and a 65,536-byte response-body limit. Tidewake applies its own bounded automatic retry policy after a normalized response or transport failure. Signature verification, timestamp validation, event idempotency, and replay protection remain responsibilities of the receiver.
 
@@ -12,13 +12,13 @@ An Oban worker runs every minute to recover at most 100 deliveries left in `proc
 
 ## Automatic delivery retries
 
-A delivery begins in `pending`, moves to `processing` when its numbered job is claimed, and then either reaches a terminal state or returns to `pending` with a future schedule. A successful `200..299` response sets the delivery to `succeeded`. A permanent failure, or a retryable failure on the sixth total attempt, sets it to `failed`. If the endpoint is inactive when due work is claimed, the delivery becomes `cancelled` without sending HTTP or adding an attempt.
+A delivery begins in `pending`, moves to `processing` when its cycle-aware job is claimed, and then either reaches a terminal state or returns to `pending` with a future schedule. A successful `200..299` response sets the delivery to `succeeded`. A permanent failure, or a retryable failure on the sixth automatic attempt in the current cycle, sets it to `failed`. Admin manual retry may start at most three new cycles after the initial cycle, giving a theoretical maximum of 24 automatic attempts while preserving lifetime `attempt_count`. See [manual retry and audit](manual-retries.md). If the endpoint is inactive when due work is claimed, the delivery becomes `cancelled` without sending HTTP or adding an attempt.
 
 Only these HTTP responses are retryable: `408`, `425`, `429`, `500`, `502`, `503`, and `504`. Only the normalized transport outcomes `timeout`, `dns`, `connection`, and `closed` are retryable. Other HTTP responses, including `409`, and transport outcomes such as `tls`, `destination`, `response_limit`, and `unknown` are terminal. Unknown or malformed outcomes do not become eligible for retry.
 
-The delay uses exponential backoff with a 10-second base and a 300-second ceiling. Equal jitter selects an integer delay from the inclusive range between half of the calculated ceiling, rounded up, and the full ceiling. With the current six-attempt budget, the five possible retry ranges are 5–10, 10–20, 20–40, 40–80, and 80–160 seconds. Tidewake does not currently honor `Retry-After`.
+The delay uses exponential backoff with a 10-second base and a 300-second ceiling. Equal jitter selects an integer delay from the inclusive range between half of the calculated ceiling, rounded up, and the full ceiling. Within each six-attempt cycle, the five possible retry ranges are 5–10, 10–20, 20–40, 40–80, and 80–160 seconds. Tidewake does not currently honor `Retry-After` received from destinations; the manual-retry API's own 429 admission response is a separate contract.
 
-Oban executes each logical attempt job once (`max_attempts: 1`); a retryable application outcome completes that job successfully. Tidewake then schedules a distinct successor whose arguments contain only `delivery_id` and `attempt_number`. The claim locks the delivery and requires that number to equal `delivery.attempt_count + 1`; it also refuses to run before `Delivery.next_attempt_at`. These guards prevent stale, duplicate, future-numbered, and early jobs from sending HTTP.
+Oban executes each logical attempt job once (`max_attempts: 1`); a retryable application outcome completes that job successfully. New successor jobs carry `delivery_id`, lifetime `attempt_number`, `retry_cycle` and `cycle_attempt_number`. Claim locks the delivery and checks the next lifetime number, current cycle and next cycle ordinal; it also refuses to run before `Delivery.next_attempt_at`. These guards prevent stale, duplicate, wrong-cycle, future-numbered and early jobs from sending HTTP. Legacy one/two-field job formats remain temporarily supported internally.
 
 For a retry, the failed `Attempt`, the delivery's return to `pending`, and the successor Oban job are committed in one database transaction. `Attempt.next_attempt_at` is the historical record of the schedule chosen by that failure. `Delivery.next_attempt_at` is the current outstanding schedule and is cleared when the retry is claimed or the delivery becomes terminal. A rollback cannot leave a retry attempt without a job or a job without its corresponding delivery state.
 
@@ -36,13 +36,13 @@ Committed retry schedules emit `tidewake.webhooks.delivery.retry_scheduled.count
 
 ## Authentication
 
-All routes under `/api` are protected. A client must send exactly one authorization header using the configured static API token:
+All routes under `/api` require exactly one project-bound service-account Bearer credential. Use the exact issued value over TLS; the placeholder below is intentionally invalid:
 
 ```http
-Authorization: Bearer <token>
+Authorization: Bearer <service-account-token>
 ```
 
-A missing, malformed, duplicated, or invalid header returns `401 Unauthorized` before the controller or any event operation runs. The response includes:
+A missing, malformed, duplicated, unknown, expired or revoked credential, disabled account or suspended project returns the same `401 Unauthorized` before event operations. The response includes `Cache-Control: no-store` and:
 
 ```http
 WWW-Authenticate: Bearer
@@ -54,22 +54,22 @@ and this JSON body:
 {
   "error": {
     "code": "unauthorized",
-    "message": "Valid API token required"
+    "message": "Valid service account credential required"
   }
 }
 ```
 
-Development uses the recognizable non-production token `dev-only-api-token-not-for-production` by default. Production has no fallback: `TIDEWAKE_API_TOKEN` is required and must contain at least 32 bytes. No real token belongs in source control or documentation.
+The static token and `TIDEWAKE_API_TOKEN` configuration have been removed. Production requires the independent server-side `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER` of at least 32 bytes. Provision a service account and store its one-time token in a secret manager; see [authentication setup](../../README.md#local-setup). No real token or pepper belongs in source control or examples.
 
-This shared static token is only an initial authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, scopes, multiple simultaneous tokens, and automatic rotation remain pending.
+Admin and producer may POST events; admin, producer and viewer may GET events and their delivery status. Other actions deny by default. Functional denial returns fixed 403 before object lookup; foreign and absent events share the same 404. Project identity comes from authenticated Scope, never body/query/header fields. Multiple credentials can overlap for rotation without changing the account or project. Human users, sessions, OAuth, JWT and automated rotation remain pending.
 
 ## POST /api/events
 
-Accepts a client-provided event as a JSON object. For example, using the public local development value rather than a real credential:
+Accepts a client-provided event as a JSON object. The token placeholder must be replaced securely with an issued credential:
 
 ```bash
 curl --fail-with-body -X POST http://localhost:4000/api/events \
-  -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+  -H 'Authorization: Bearer <service-account-token>' \
   -H 'content-type: application/json' \
   -d '{"external_id":"evt_123","type":"order.created","data":{"order_id":"123"}}'
 ```
@@ -77,7 +77,7 @@ curl --fail-with-body -X POST http://localhost:4000/api/events \
 ```http
 POST /api/events
 Content-Type: application/json
-Authorization: Bearer <token>
+Authorization: Bearer <service-account-token>
 ```
 
 Request:
@@ -106,7 +106,7 @@ Missing fields, `null` values, empty or whitespace-only strings for `external_id
 
 ### Idempotency and immutability
 
-`external_id` must be unique across accepted events. The `events_external_id_index` unique database index enforces this invariant, including for concurrent requests. A new valid event and its initial delivery work are committed together before returning `201 Created`.
+`external_id` must be unique within the authenticated project. The `events_project_id_external_id_index` unique database index enforces `(project_id, external_id)`, including for concurrent requests; independent projects may reuse an external ID. A new valid event and its initial delivery work are committed together before returning `201 Created`.
 
 A subsequent valid request with an existing `external_id` returns `409 Conflict`, whether its `type` and `data` match the original event or differ. It does not create another event, replace the original, add deliveries or jobs, or return a second `201 Created`.
 
@@ -118,7 +118,7 @@ Responses use `Content-Type: application/json`. Successful responses wrap the ac
 
 ### Transactional fan-out
 
-Until projects and subscriptions exist, every active endpoint is temporarily eligible for every new event. Inactive endpoints are ignored. For each eligible endpoint, ingestion persists one pending delivery and one initial job. Event, deliveries, and jobs are confirmed in a single transaction; if any insertion fails, none of that ingestion is persisted.
+Only active endpoints in the authenticated event project are eligible. Inactive and other-project endpoints are excluded. For each eligible endpoint, ingestion persists one pending delivery and one initial job. Event, deliveries and jobs are confirmed in a single transaction; if any insertion fails, none of that ingestion is persisted. Composite database references prevent a delivery linking an event and endpoint from different projects.
 
 Zero active endpoints is valid: the event is persisted and `201 Created` is returned without deliveries or jobs. Deactivating an endpoint later does not remove work already created for an accepted event.
 
@@ -201,7 +201,7 @@ Returns the same event representation used by the creation response:
 
 ### 404 Not Found
 
-Returned when the internal ID does not exist or the path value is invalid, negative, or zero:
+Returned when the internal ID is absent or belongs to another project, or the path value is invalid, negative or zero. Foreign and absent events use the same response:
 
 ```json
 {
@@ -244,7 +244,7 @@ Each delivery contains exactly these fields:
 | `id` | Internal delivery ID. |
 | `endpoint_id` | Internal ID of the destination endpoint, without exposing its configuration. |
 | `status` | Current persisted delivery state: `pending`, `processing`, `succeeded`, `failed`, or `cancelled`. `pending` does not mean that a webhook was sent. |
-| `attempt_count` | Number of processing attempts persisted for the delivery. |
+| `attempt_count` | Lifetime number of persisted automatic attempts across cycles; manual retry never resets it. |
 | `next_attempt_at` | Current scheduled time for a future attempt as a UTC ISO 8601 string, or `null` when no retry is pending. Historical retry times remain on the attempts that scheduled them and are not exposed by this endpoint. |
 | `completed_at` | Completion time as a UTC ISO 8601 string, or `null` while incomplete. |
 | `inserted_at` | Creation time as a UTC ISO 8601 string. |
@@ -264,7 +264,7 @@ The response deliberately excludes endpoint URLs, event payloads, attempts, requ
 
 ### 404 Not Found
 
-Returned when the event does not exist or the path value is invalid, negative, or zero. It uses the same event error representation as `GET /api/events/:id`:
+Returned when the event is absent or belongs to another project, or the path value is invalid, negative or zero. It uses the same non-disclosing event error representation as `GET /api/events/:id`:
 
 ```json
 {
@@ -282,7 +282,7 @@ Returned when the event does not exist or the path value is invalid, negative, o
 - `Retry-After` response handling and manual retry operations.
 - Retry management UI and external alerts.
 - Receiver-side signature verification, timestamp validation, and replay protection.
-- Users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token.
+- Human users, sessions, OAuth, JWT and automated credential rotation; project-scoped service accounts and overlapping credentials are implemented.
 - Event listing, updates, and deletion.
 
-The delivery-status API is observational only: it does not trigger a retry or expose attempt history. Automatic retries run from persisted jobs; manual retry controls, retry UI, external alerting, and `Retry-After` support remain pending.
+The delivery-status API is observational only: it does not trigger a retry or expose attempt history. Automatic retries run from persisted jobs. Admin manual retry POST and audit GET are separate implemented resources documented in [manual retries](manual-retries.md); retry UI, external alerting and receiver `Retry-After` handling remain pending.
