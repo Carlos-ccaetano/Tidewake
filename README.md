@@ -41,6 +41,8 @@ Tidewake accepts and retrieves individual events through its HTTP API, manages d
 
 See [architecture.md](docs/architecture.md) for boundaries and future entities.
 
+See the [migration/cutover checklist and local recovery rehearsal](docs/operations/migration-cutover.md) for rollout prerequisites, restore verification and current operational gaps.
+
 See the [endpoint management API contract](docs/api/endpoints.md) for the endpoint representation and operations.
 
 See the [event ingestion API contract](docs/api/events.md) for event creation, retrieval, validation, and idempotency behavior.
