@@ -88,3 +88,11 @@ jobs:
 
       - name: Run tests
         run: mix test
+
+      - name: Build and verify static assets
+        run: |
+          mix assets.setup
+          mix assets.deploy
+          test -s priv/static/assets/css/app.css
+          test -s priv/static/assets/js/app.js
+          jq -e '.latest["assets/css/app.css"] and .latest["assets/js/app.js"]' priv/static/cache_manifest.json > /dev/null
