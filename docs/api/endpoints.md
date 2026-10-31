@@ -6,7 +6,7 @@ Endpoint persistence and the endpoint management HTTP API are implemented. The `
 
 Active endpoints participate in the transactional fan-out of newly ingested events. Tidewake persists a delivery and an initial Oban job for each active endpoint. For an active endpoint, the processor signs the exact serialized envelope before passing it to the configured adapter. If the endpoint is inactive when the delivery is claimed, Tidewake cancels the delivery without invoking the adapter or creating an attempt. A periodic worker returns stale deliveries left in `processing` to `pending` for another execution.
 
-Production uses the Req adapter with the system resolver and public-only destination policy. Development remains deterministic unless outbound HTTP is explicitly enabled; private-use and loopback destinations require a second development-only opt-in, and all other special-purpose ranges remain blocked. Each delivery attempt validates the URL again, resolves IPv4 and IPv6 hostnames, rejects mixed safe and unsafe answers, and connects to one approved IP while preserving the original hostname for Host, SNI, and TLS verification. Redirects and internal retries are disabled, idle dynamic pools expire after 60 seconds, and response bodies are streamed, limited to 65,536 bytes, and discarded. Persisted transport failures contain only bounded classifications. Every route under `/api`, including endpoint management, requires the configured static API token.
+Production uses the Req adapter with the system resolver and public-only destination policy. Development remains deterministic unless outbound HTTP is explicitly enabled; private-use and loopback destinations require a second development-only opt-in, and all other special-purpose ranges remain blocked. Each delivery attempt validates the URL again, resolves IPv4 and IPv6 hostnames, rejects mixed safe and unsafe answers, and connects to one approved IP while preserving the original hostname for Host, SNI, and TLS verification. Redirects and internal retries are disabled, idle dynamic pools expire after 60 seconds, and response bodies are streamed, limited to 65,536 bytes, and discarded. Persisted transport failures contain only bounded classifications. Every `/api` route, including endpoint management, requires project-bound service-account authentication and explicit permission.
 
 An endpoint represents a registered external destination that can receive webhooks sent by Tidewake.
 
@@ -38,13 +38,13 @@ Permanent deletion is not part of this initial contract. To stop new deliveries 
 
 ## Authentication
 
-All routes under `/api` are protected. A client must send exactly one authorization header using the configured static API token:
+All routes under `/api` require exactly one project-bound service-account Bearer credential. Use the exact issued value over TLS; the placeholder below is intentionally invalid:
 
 ```http
-Authorization: Bearer <token>
+Authorization: Bearer <service-account-token>
 ```
 
-A missing, malformed, duplicated, or invalid header returns `401 Unauthorized` before the controller or any endpoint operation runs. The response includes:
+A missing, malformed, duplicated, unknown, expired or revoked credential, disabled account or suspended project returns the same `401 Unauthorized` before endpoint operations. The response includes `Cache-Control: no-store` and:
 
 ```http
 WWW-Authenticate: Bearer
@@ -56,14 +56,14 @@ and this JSON body:
 {
   "error": {
     "code": "unauthorized",
-    "message": "Valid API token required"
+    "message": "Valid service account credential required"
   }
 }
 ```
 
-Development uses the recognizable non-production token `dev-only-api-token-not-for-production` by default. Production has no fallback: `TIDEWAKE_API_TOKEN` is required and must contain at least 32 bytes. No real token belongs in source control or documentation.
+The static token and `TIDEWAKE_API_TOKEN` configuration have been removed. Production requires the independent server-side `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER` of at least 32 bytes. Provision a service account and store its one-time token in a secret manager; see [authentication setup](../../README.md#local-setup). No real token or pepper belongs in source control or examples.
 
-This shared static token is only an initial authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, scopes, multiple simultaneous tokens, and automatic rotation remain pending.
+Admin, producer and viewer may list/show endpoints within their project. Only admin may create/update/deactivate them; other roles receive fixed 403 before object lookup. Foreign and absent endpoints share the same 404. Project ownership comes from authenticated Scope and cannot be selected or changed through body/query/header fields. Overlapping credentials support deliberate rotation; human users, sessions, OAuth, JWT and automated rotation remain pending.
 
 ### POST /api/endpoints
 
@@ -73,7 +73,7 @@ Request:
 
 ```bash
 curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
-  -H 'Authorization: Bearer dev-only-api-token-not-for-production' \
+  -H 'Authorization: Bearer <service-account-token>' \
   -H 'content-type: application/json' \
   -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 ```
@@ -260,11 +260,9 @@ Error responses must not expose database details or stack traces.
 
 The following capabilities remain outside the current implementation:
 
-- users, sessions, OAuth, JWT, project-level or scoped authorization, multiple simultaneous tokens, and automatic token rotation beyond the shared static API token;
-- project ownership for endpoints and events;
-- retry and backoff policies;
+- human users, sessions, OAuth, JWT and automated credential rotation;
 - pagination;
 - advanced filtering;
 - endpoint health checks;
-- rate limiting and an operational interface;
+- general endpoint rate limiting and an operational interface (manual retry has a separate implemented per-account admission bucket);
 - production deployment.

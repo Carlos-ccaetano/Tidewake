@@ -27,11 +27,11 @@ Goal: prove the smallest durable workflow.
 Implemented:
 
 - schemas, context operations, and database persistence for events, deliveries, and attempts;
-- a database-enforced unique index on `external_id` as the ingestion idempotency key;
+- database-enforced event idempotency, now scoped by `(project_id, external_id)`;
 - `POST /api/events` for validation and atomic persistence of the event, its fan-out deliveries, and initial jobs;
 - `GET /api/events/:id` for individual event retrieval;
 - `GET /api/events/:id/deliveries` for the event's ordered delivery status without endpoint configuration, payloads, or attempts;
-- shared static Bearer token authentication for every `/api` route, with a recognizable non-production development value, a required production `TIDEWAKE_API_TOKEN` of at least 32 bytes, and a stable `401 Unauthorized` response with `WWW-Authenticate: Bearer`;
+- API authentication, now using project-bound service-account Bearer credentials and explicit permissions on every route, with uniform `401 Unauthorized` and `WWW-Authenticate: Bearer`; this supersedes the initial shared static token;
 - tests for event validation, persistence, duplicate ingestion, rollback boundaries, fan-out, and the implemented HTTP operations;
 - atomic creation of a delivery and its Oban job through `schedule_delivery/2`;
 - an Oban worker on the `default` queue with `max_attempts: 1`, delegating to the processor;
@@ -72,13 +72,13 @@ Completed:
 - the Req adapter enabled in production with the system resolver and public-only targets;
 - deterministic development by default, with separate explicit development flags for outbound HTTP and local targets;
 - a complete worker-path test using Req.Test and an independently recalculated HMAC without external network access.
+- required project ownership for endpoints, events and deliveries, composite same-project database references and project-scoped event idempotency;
+- project-scoped API reads/writes with default-deny route permissions and non-disclosing foreign/absent 404 responses.
 
 Tests remain deterministic and do not access the network. Production uses the guarded Req transport. Signature verification, timestamp validation, replay protection, used-signature storage, and secret rotation are responsibilities of the receiver and remain outside Tidewake.
 
 Planned:
 
-- associate endpoints with projects;
-- add project-scoped authorization;
 - add endpoint health checks and rate limiting.
 
 ## Milestone 3: retry and idempotency hardening
@@ -90,7 +90,7 @@ Completed:
 - classify transient and permanent HTTP and transport outcomes through explicit allowlists that fail closed;
 - persist the monotonic lifetime `attempt_count` and the delivery's `retry_cycle` and `cycle_attempt_count`; record each attempt's lifetime `attempt_number`, `retry_cycle`, and `cycle_attempt_number`;
 - enforce database ranges for the cycle counters and uniqueness of each attempt's delivery, cycle, and cycle ordinal;
-- define a pure manual retry eligibility policy with a limit of three manual cycles, without exposing an operational retry entry point;
+- define a pure manual retry eligibility policy with a limit of three manual cycles after the initial cycle, each allowing six automatic attempts (theoretical maximum 24);
 - limit automatic delivery to six attempts per cycle and apply exponential backoff with a 10-second base, a 300-second ceiling, and equal jitter;
 - identify new jobs by `delivery_id`, `attempt_number`, `retry_cycle`, and `cycle_attempt_number`, while temporarily accepting legacy job formats;
 - reject stale, duplicate, future-numbered, or early work under the delivery claim lock before sending HTTP, validating the complete cycle identity for new jobs;
@@ -103,28 +103,27 @@ Completed:
 - map the audit schema and enforce named database constraints for bounded identity, observations, and accepted/rejected consistency;
 - enforce actor-scoped idempotency through the unique key digest, without retaining the raw key;
 - derive a deterministic canonical request fingerprint for the versioned delivery retry operation;
-- validate an internal `ManualRetryActor` context carrying actor type, opaque subject, and trusted source, without implementing authentication;
+- derive the internal `ManualRetryActor` from authenticated Scope with service-account type, opaque account subject and server-selected source;
 - implement the internal transactional `request_manual_retry/3` command with delivery-then-endpoint row locks and idempotent replay resolution;
 - persist accepted and rejected audit records with the observed delivery state and bounded decision reasons;
 - commit the accepted audit, `failed → pending` transition, new retry cycle, and immediate cycle-aware job atomically, resetting only the cycle attempt count and preserving lifetime history;
 - cover concurrent requests with PostgreSQL row locks and actor-scoped unique constraints, without relying on which task wins;
 - cover audit insertion, delivery update, job insertion, legacy-job and cycle-aware conflicts, rejected-request persistence, and idempotency rollback boundaries;
 - emit bounded post-transaction manual retry Telemetry with count and duration metrics, fixed outcome/reason tags, and confidentiality coverage.
+- project-bound service accounts with expiring/revocable HMAC digest-only credentials and operational tasks for provisioning, rotation, revocation, account disablement and project suspension;
+- authenticated admin manual retry POST and audit GET, reauthorizing replay and every page within project scope;
+- project-bound v2 retry fingerprints without rewriting historical v1 digest/fingerprint bytes;
+- PostgreSQL per-account retry admission (five tokens, refill one per 12 seconds), shared across credential rotation, including admitted replay/errors and excluding GET;
+- bounded id-descending audit pagination and explicit historical field allowlists, with integrated HTTP concurrency, rollback, rate-limit and privacy regressions.
 
 Planned:
 
-- implement a real authenticated principal model with service accounts or users;
-- establish project ownership as the scope for delivery access;
-- add administrative authorization for manual retry, including replays;
-- expose an authenticated operational endpoint only after attributable identity and authorization exist;
-- provide authorized audit retrieval;
 - build the operational LiveView interface in Milestone 4;
-- add rate limiting for manual retry requests;
-- support `Retry-After` without weakening the bounded retry policy;
+- support `Retry-After` received from destinations without weakening the bounded retry policy;
 - define retention and payload-size policy, with retention jobs in Milestone 5;
 - complete production deployment and rollback work in Milestone 5.
 
-The internal manual retry core is complete, but the operation is not exposed to callers. The actor context does not supply a real authenticated principal, and there is no operational retry endpoint, audit retrieval, or retry UI. Milestone 3 remains in progress while the planned identity, ownership, authorization, operational controls, retention, and deployment work remains open.
+The core, authenticated admin retry POST and audit GET are implemented; see the [current retry contract](api/manual-retries.md) and [authentication setup](../README.md#local-setup). Six automatic attempts apply per cycle, while lifetime history remains monotonic across at most three manual cycles. Milestone 3 remains in progress while receiver Retry-After, retention/deletion, UI and deployment work remain pending. There is no human identity or HTTP credential-management API, and this sequence has not changed Ironhold.
 
 ## Milestone 4: operational interface
 
@@ -147,4 +146,4 @@ The internal manual retry core is complete, but the operation is not exposed to 
 
 The order may change when evidence from earlier milestones reveals a better boundary.
 
-The implemented shared token is an authentication boundary, not complete authorization. Users, sessions, OAuth, JWT, project-level authorization, and multiple simultaneous tokens remain future identity and access work; they are not prerequisites for considering the current static token authentication implemented.
+Project-bound service accounts, overlapping rotatable credentials and route/object authorization are implemented. `TIDEWAKE_API_TOKEN` is removed and the old static token is rejected; production requires `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER`. Human users, sessions, OAuth, JWT and automated credential/secret rotation remain future work. A green merge does not establish production rollout.
