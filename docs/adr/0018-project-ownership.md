@@ -3,6 +3,12 @@
 - Status: accepted
 - Date: 2026-10-25
 
+## Current implementation status
+
+Project ownership and project-bound API authentication are implemented. The [ownership migration](../../priv/repo/migrations/20261030074028_scope_webhook_resources_by_project.exs) preserves legacy ownership, requires non-null project references and enforces composite Delivery relationships to same-project Event/Endpoint records; event external IDs are unique per project. Ownership is immutable through supported application operations. [Scope](../../lib/tidewake/projects/scope.ex) comes from persisted service-account authentication, and [HTTP isolation tests](../../test/tidewake_web/controllers/api_isolation_regression_test.exs) cover trusted project lookup and non-disclosing 404s. There is no static-token or implicit legacy-scope HTTP fallback.
+
+Admin manual retry POST and audit GET resolve Delivery within trusted project scope, including replay and every page. See [authentication operations](../api/authentication.md) and the [retry contract](../api/manual-retries.md). Human identity/UI, HTTP credential management, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
+
 ## Context
 
 Tidewake currently stores endpoints, events, and deliveries globally. They use generated integer primary keys; `events.external_id` has a global unique index, and deliveries have restrictive foreign keys to events and endpoints plus uniqueness on `(event_id, endpoint_id)`. Attempts and manual retry audit records reference a delivery. None of these resources has project ownership yet.

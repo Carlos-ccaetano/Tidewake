@@ -14,7 +14,7 @@ Automatic retries use explicit transient and permanent classifications, a six-at
 
 The manual retry command requires an authenticated project Scope and current admin authority, including on replay. `Tidewake.Webhooks.request_manual_retry/3` uses project-bound version-2 fingerprints and digest-only actor-scoped idempotency. Acceptance atomically commits its audit record, delivery transition and immediate cycle-aware job; rejection records only its decision, and replay creates no additional work. PostgreSQL locks and uniqueness arbitrate concurrent requests. Lifetime attempt history is preserved, with at most three manual cycles after the original automatic cycle.
 
-Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The API contract](docs/api/manual-retries.md) documents POST and the admin-only GET on the same path. GET returns historical audit snapshots with id-descending cursor pagination (default 50, maximum 100), never consumes the POST bucket and uses the same non-disclosing 404 and no-store policy. Retry UI, receiver `Retry-After` handling, retention and payload policy, human users, secret rotation, metrics reporting, external alerts and production deployment remain future work.
+Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The API contract](docs/api/manual-retries.md) documents POST and the admin-only GET on the same path. GET returns historical audit snapshots with id-descending cursor pagination (default 50, maximum 100), never consumes the POST bucket and uses the same non-disclosing 404 and no-store policy. Each cycle permits six automatic attempts; the initial cycle plus at most three manual cycles gives a theoretical maximum of 24, without resetting lifetime history. Retry UI, receiver `Retry-After` handling, audit retention/deletion and payload policy, human users, automated secret rotation, metrics reporting, external alerts and production deployment remain future work.
 
 ## Relationship with Ironhold
 
@@ -97,13 +97,18 @@ Production requires `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER` from a secret manage
 Provision in the intended environment (use `MIX_ENV=prod` with production configuration when operating production):
 
     mix tidewake.projects.create --name Local --slug local
-    mix tidewake.service_accounts.provision --project <project-public-id> --name LocalAdmin --role admin --expires-in-days 30
 
-The task prints account/credential public IDs and the raw credential exactly once after commit. Store it in a secret manager; it cannot be recovered from the database. The curl examples expect `TIDEWAKE_SERVICE_ACCOUNT_TOKEN` loaded from that manager into the client shell. Existing data retains legacy-project ownership and requires an explicitly provisioned account for that recorded project; creating a project does not transfer data.
+Set `PROJECT_PUBLIC_ID` to the public UUID printed by the create task, then provision an admin:
+
+    mix tidewake.service_accounts.provision --project "$PROJECT_PUBLIC_ID" --name LocalAdmin --role admin --expires-in-days 30
+
+Provisioning prints account/credential public IDs and the raw credential exactly once after commit. Store it in a secret manager; it cannot be recovered from the database. The curl examples expect `TIDEWAKE_SERVICE_ACCOUNT_TOKEN` loaded from that manager into the client shell. Existing data retains legacy-project ownership and requires an explicitly provisioned account for that recorded project; creating a project does not transfer data.
 
 To retire a credential, use its printed public ID:
 
-    mix tidewake.service_accounts.revoke_credential --project <project-public-id> --credential <credential-public-id>
+    mix tidewake.service_accounts.revoke_credential --project "$PROJECT_PUBLIC_ID" --credential "$CREDENTIAL_PUBLIC_ID"
+
+`CREDENTIAL_PUBLIC_ID` is the printed credential UUID. `TIDEWAKE_API_TOKEN` has been removed from configuration and grants no API access. See [authentication and safe credential rotation](docs/api/authentication.md) for the full role matrix, additional issuance, revocation, account disablement and project suspension. These are operational Mix tasks; no credential-management HTTP API exists.
 
 Missing, malformed, duplicated, unknown, expired or revoked credentials, disabled accounts and suspended projects return the same `401 Unauthorized`, `WWW-Authenticate: Bearer` and `Cache-Control: no-store`:
 
@@ -219,7 +224,7 @@ Implemented endpoint, event, delivery, attempt, transactional fan-out, attempt-a
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Outbound HTTP delivery, bounded automatic retries, authenticated admin manual retry POST, per-account retry admission, service-account identity, project ownership and route authorization are implemented. The reliability milestone remains in progress while receiver `Retry-After` handling, retention and payload policy, and related hardening remain pending.
+3. Outbound HTTP delivery, bounded automatic retries, authenticated admin manual retry POST and paginated audit GET, per-account retry admission, service-account identity, project ownership and route authorization are implemented. The reliability milestone remains in progress while receiver `Retry-After` handling, retention and payload policy, and related hardening remain pending.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 

@@ -5,9 +5,9 @@
 
 ## Current implementation status
 
-The `manual_retry_requests` storage and schema, digest-only actor-scoped idempotency, internal actor context, and transactional `request_manual_retry/3` command are implemented. Accepted decisions commit with the delivery transition and immediate cycle-aware job; rejected decisions persist only their audit record, and replays perform no write. Tests cover PostgreSQL concurrency, unique-key races, rollback at each persistence boundary, confidentiality, and bounded post-transaction completion Telemetry.
+The [audit schema](../../lib/tidewake/webhooks/manual_retry_request.ex), actor-scoped digest-only idempotency and transactional command are implemented behind authenticated admin POST and paginated GET. Accepted decisions commit with the transition and job; rejected decisions commit only their audit, and replay writes nothing. New API requests use project-bound fingerprint v2; the [version migration](../../priv/repo/migrations/20261030102400_version_manual_retry_fingerprints.exs) labels historical records v1 without rewriting their digest or fingerprint bytes. Authorized reads select nine historical fields, excluding digests and version, without mutable actor joins; see [audit tests](../../test/tidewake/webhooks/manual_retry_audit_test.exs).
 
-The command and audit remain internal. An attributable authenticated principal, project ownership, administrative authorization, a retry HTTP route or controller, audit retrieval, and a retry UI remain pending. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+The [current API contract](../api/manual-retries.md) documents attribution, replay, PostgreSQL admission and no-store responses. Human identity/UI, HTTP credential management, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
 
 ## Context
 

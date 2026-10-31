@@ -3,6 +3,14 @@
 - Status: accepted
 - Date: 2026-10-27
 
+## Current implementation status
+
+The [router](../../lib/tidewake_web/router.ex), [controller](../../lib/tidewake_web/controllers/manual_retry_request_controller.ex) and [integrated security tests](../../test/tidewake_web/controllers/manual_retry_api_security_test.exs) implement and verify admin-only POST decisions and GET audit, project-scoped reauthorization, digest-only actor keys, v2 fingerprints, atomic audit/transition/Oban persistence, bounded responses and no-store errors. Historical v1 rows retain their original bytes and remain readable through the audit allowlist; they never become v2 replays. The PostgreSQL bucket permits five POST admissions per account, refills one per complete 12-second interval and includes replay/errors after authorization; GET never touches it.
+
+The reviewed HTTP implementation has two representation details beyond the original wording below: POST accepts an absent body **or an empty JSON object**, at most 1024 bytes with JSON content type for a nonempty body; GET uses `{"data":[...],"page":{"next_before_id":...}}`. GET still requires zero body bytes. POST's invalid-key response is `invalid_idempotency_key`; other invalid input uses `invalid_request`. These are the current [API contract](../api/manual-retries.md), covered by [controller tests](../../test/tidewake_web/controllers/manual_retry_request_controller_test.exs); this note does not rewrite the historical decision.
+
+Human identity/UI, HTTP credential management, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
+
 ## Context
 
 The internal `request_manual_retry/3` command already commits accepted audit records, delivery transitions, and immediate cycle-aware jobs atomically. Rejections persist only their decision; replays return the original record. ADRs 0015–0017 preserve append-only history, actor-scoped idempotency, three manual cycles, and six attempts per cycle.

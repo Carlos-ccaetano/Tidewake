@@ -5,9 +5,9 @@
 
 ## Current implementation status
 
-The internal transactional manual retry command now enforces this cycle limit with append-only audit storage and schema, digest-only actor-scoped idempotency, and an internal actor context. Acceptance preserves lifetime attempt history and atomically commits the audit, cycle transition, and immediate job. PostgreSQL concurrency tests cover competing requests at the final cycle boundary, rollback tests protect partial-write boundaries, and completion Telemetry remains bounded and follows the command's transaction.
+The [manual retry policy](../../lib/tidewake/webhooks/manual_retry_policy.ex) and [transactional command](../../lib/tidewake/webhooks.ex) enforce this lifetime limit through the authenticated admin POST boundary. Cycle 0 plus at most three manual cycles each permit six automatic attempts, for a theoretical maximum of 24. Acceptance preserves lifetime attempt_count, resets only cycle_attempt_count and atomically commits audit, transition and job. [Concurrency tests](../../test/tidewake/webhooks/manual_retry_concurrency_test.exs) and [HTTP regressions](../../test/tidewake_web/controllers/manual_retry_api_security_test.exs) cover competing requests at the final cycle boundary.
 
-Operational access remains pending: there is no attributable authenticated principal, project ownership, administrative authorization, retry HTTP route or controller, audit retrieval, or retry UI. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+Admin POST, per-account PostgreSQL admission and paginated audit GET are implemented; see the [current HTTP contract](../api/manual-retries.md). Human identity/UI, HTTP credential management, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
 
 ## Context
 
