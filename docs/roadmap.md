@@ -75,7 +75,7 @@ Completed:
 - required project ownership for endpoints, events and deliveries, composite same-project database references and project-scoped event idempotency;
 - project-scoped API reads/writes with default-deny route permissions and non-disclosing foreign/absent 404 responses.
 
-Tests remain deterministic and do not access the network. Production uses the guarded Req transport. Signature verification, timestamp validation, replay protection, used-signature storage, and secret rotation are responsibilities of the receiver and remain outside Tidewake.
+Outbound adapter tests remain deterministic without external network access; HTTP boundary regressions also exercise supervised loopback listeners. Production configuration selects the guarded Req transport. Signature verification, timestamp validation, replay protection, used-signature storage, and secret rotation are responsibilities of the receiver and remain outside Tidewake.
 
 Planned:
 
@@ -144,6 +144,37 @@ The core, authenticated admin retry POST and audit GET are implemented; see the 
 - deployment and rollback documentation;
 - service-level indicators and alert thresholds.
 
-The order may change when evidence from earlier milestones reveals a better boundary.
+Milestone numbers group capabilities. The next operational and product work follows the risk order below, rather than milestone-number order.
 
 Project-bound service accounts, overlapping rotatable credentials and route/object authorization are implemented. `TIDEWAKE_API_TOKEN` is removed and the old static token is rejected; production requires `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER`. Human users, sessions, OAuth, JWT and automated credential/secret rotation remain future work. A green merge does not establish production rollout.
+
+## Authenticated manual retry: merged implementation complete
+
+The identity, ownership and authenticated manual-retry HTTP implementation phase is complete in main. These are merged code, regression tests and documentation, with evidence for each capability:
+
+| Completed capability | Implementation and verification |
+| --- | --- |
+| Project, ServiceAccount and HMAC digest-only credentials | [Projects context](../lib/tidewake/projects.ex) and [credential regressions](../test/tidewake/projects/service_account_credentials_test.exs); no recoverable raw token is stored. |
+| Operational provisioning and lifecycle | [Mix operations](../lib/mix/tasks/tidewake.provisioning.ex) and [task tests](../test/mix/tasks/provisioning_test.exs) cover project creation, provisioning, additional issuance for rotation, revocation, account disablement and project suspension. |
+| Authenticated Scope and admin/producer/viewer permissions | [Scope](../lib/tidewake/projects/scope.ex), [default-deny policy](../lib/tidewake/projects/authorization.ex) and [route permission tests](../test/tidewake_web/controllers/api_authentication_test.exs). |
+| Immutable Endpoint/Event/Delivery ownership through supported operations | [Ownership migration](../priv/repo/migrations/20261030074028_scope_webhook_resources_by_project.exs) and [ownership tests](../test/tidewake/webhooks/project_ownership_test.exs) verify required references, composite cross-project protection and project-local event identity. |
+| Complete static-token cutover | [Router](../lib/tidewake_web/router.ex) and [API isolation regressions](../test/tidewake_web/controllers/api_isolation_regression_test.exs) verify project-bound authentication on every API route, no shared-token fallback and non-disclosing object access. |
+| Project-scoped fingerprint v2 with historical v1 preservation | [Version migration](../priv/repo/migrations/20261030102400_version_manual_retry_fingerprints.exs) and [migration tests](../test/tidewake/webhooks/manual_retry_fingerprint_migration_test.exs) preserve v1 digest/fingerprint bytes; new API requests cannot reinterpret them as v2 replay. |
+| Authorized retry, including replay | [Transactional command](../lib/tidewake/webhooks.ex) and [authorization tests](../test/tidewake/webhooks/manual_retry_authorization_test.exs) verify current admin/project authority before decisions and replays, atomic audit/state/job persistence and immutable history. |
+| PostgreSQL admission per service account | [Limiter](../lib/tidewake/projects/manual_retry_rate_limiter.ex) and [limiter tests](../test/tidewake/projects/manual_retry_rate_limiter_test.exs) verify five tokens, one refill per complete 12 seconds, shared capacity across credentials and serialized concurrent consumption. |
+| Admin retry POST and paginated audit GET | [Controller](../lib/tidewake_web/controllers/manual_retry_request_controller.ex), [HTTP tests](../test/tidewake_web/controllers/manual_retry_request_controller_test.exs) and [audit tests](../test/tidewake/webhooks/manual_retry_audit_test.exs) verify explicit field allowlists, no-store, stable historical reads and no GET admission consumption. |
+| Authentication, object/function authorization, concurrency, rollback and non-disclosure regressions | [Integrated HTTP security suite](../test/tidewake_web/controllers/manual_retry_api_security_test.exs), [concurrency tests](../test/tidewake/webhooks/manual_retry_concurrency_test.exs), [rollback tests](../test/tidewake/webhooks/manual_retry_rollback_test.exs) and [real transport test](../test/tidewake_web/manual_retry_transport_test.exs). |
+| Corresponding operational documentation | [Authentication and rotation](api/authentication.md), [manual retry contract](api/manual-retries.md), [architecture](architecture.md) and current implementation notes in [ADRs 0015–0020](adr/0020-project-scoped-manual-retry-api.md). |
+
+Completion of this implementation phase does not establish production deployment, execution of production migrations/cutover, validated restores, active monitoring or customer use. Those require separate operational evidence. Human identity, administrative UI and HTTP credential management are not implemented. Ironhold was not changed by this sequence.
+
+## Next blocks in risk order
+
+1. **Operationally pending — rollout hardening:** establish a migration/cutover runbook, backup/restore validation, operational metrics and alerts without sensitive cardinality. Merged code and green CI do not prove this rollout work complete.
+2. **Operationally pending — retention and disposal:** define and verify policy for manual_retry_requests and obsolete/orphaned rate-limit rows, preserving referential integrity and historical attribution before introducing cleanup.
+3. **Operationally pending — receiver backoff:** support Retry-After received from webhook targets safely inside the cycle-aware scheduler, retaining attempt/cycle bounds and claim guards. The API's own 429 admission response is already implemented and does not supply this receiver behavior.
+4. **Future product decision — human identity:** make an architectural decision for human authentication and authorization before designing access to a future administrative UI.
+5. **Future product — operational UI:** proceed only after that identity boundary, with explicit confirmation for sensitive actions and durable auditability.
+6. **Conditional future product — credential-management API:** evaluate HTTP management only if a real need is established; keep the existing operational Mix workflow as the baseline.
+
+This sequence makes no date, deployment or customer-availability commitment.
