@@ -35,6 +35,8 @@ Every allowance remains restricted to the authenticated project. Admin is not a 
 
 Commands below use a POSIX shell and the intended `MIX_ENV`; Mix defaults to development. Set the target environment deliberately before an operational invocation. Production additionally needs its database, runtime secrets and application configuration; a successful local command proves no production rollout. Never send issuance output to shared terminal recordings, CI logs or tickets.
 
+The six provisioning tasks load runtime configuration and start only the Repo and its dependencies, without starting Tidewake's application, HTTP endpoint, Oban queues or recovery cron. A temporary Repo is stopped after the operation, including on failure; an already running Repo is reused and left running. This is isolation for that CLI process, not a pause of other running instances: follow the [cutover checklist](../operations/migration-cutover.md) and quiesce all existing writers separately.
+
 Inspect task options without creating records:
 
 ```sh
