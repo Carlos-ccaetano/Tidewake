@@ -5,9 +5,9 @@
 
 ## Current implementation status
 
-The internal `request_manual_retry/3` command is implemented with audit storage and schema, digest-only actor-scoped idempotency, and an internal actor context. Acceptance commits the audit record, delivery transition, and immediate cycle-aware job atomically. Concurrency and rollback tests cover the command, and bounded completion Telemetry follows its transaction. Lifetime attempt history is preserved under the three-manual-cycle limit in ADR 0016.
+The [request_manual_retry/3 command](../../lib/tidewake/webhooks.ex), append-only audit and admin-only POST/GET boundary are implemented. Project-bound service-account authentication supplies Scope; the command revalidates current admin authority and uses v2 fingerprints with digest-only actor-scoped idempotency. Acceptance commits audit, transition and immediate job together; rejection commits only its decision, and replay writes nothing. [Integrated security tests](../../test/tidewake_web/controllers/manual_retry_api_security_test.exs) cover authorization, admission, concurrent requests and rollback.
 
-The command remains internal. An attributable authenticated principal, project ownership, administrative authorization, a retry HTTP route or controller, audit retrieval, and a retry UI remain pending. Delivery `Retry-After`, retention, rate limiting, and production deployment remain separate future work; Ironhold is unchanged.
+There are six automatic attempts per cycle and at most three manual cycles after the original cycle, for a theoretical maximum of 24; lifetime history is preserved. See the [current HTTP contract](../api/manual-retries.md). Human identity/UI, HTTP credential management, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
 
 ## Context
 

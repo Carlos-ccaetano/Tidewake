@@ -3,6 +3,12 @@
 - Status: accepted
 - Date: 2026-10-26
 
+## Current implementation status
+
+Project-bound service accounts, opaque HMAC-SHA-256 digest-only credentials, expiry/revocation, account disablement and project suspension are implemented in [Projects](../../lib/tidewake/projects.ex). The [router](../../lib/tidewake_web/router.ex) applies authentication and explicit permissions on every API route; this cutover supersedes ADR 0010's shared token. `TIDEWAKE_API_TOKEN` is removed; production requires the independent `TIDEWAKE_SERVICE_ACCOUNT_TOKEN_PEPPER` of at least 32 bytes. Scope and actor attribution are derived on the server, and sensitive retry/audit transactions revalidate account/project authority.
+
+[Operational Mix tasks](../../lib/mix/tasks/tidewake.provisioning.ex) support project creation, account provisioning, overlapping credential issuance, revocation, disablement and suspension. Tokens print once after commit and cannot be recovered. Rotation preserves account identity, immutable role, audit subject and retry budget. See [authentication operations and role matrix](../api/authentication.md) and [task regressions](../../test/mix/tasks/provisioning_test.exs). Human identity/UI, HTTP credential management, automated rotation, audit retention/deletion, receiver `Retry-After` handling and production deployment remain pending; Ironhold is unchanged. The context and decision below retain their historical wording.
+
 ## Context
 
 The shared Bearer token from ADR 0010 authenticates possession of one secret. It cannot identify an actor, bind access to a project, distinguish administrative actions, or revoke one consumer independently. ADR 0018 defines future project ownership; the implemented manual retry core in ADRs 0015–0017 still has no authenticated operational boundary.
