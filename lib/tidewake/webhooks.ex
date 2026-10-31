@@ -13,6 +13,7 @@ defmodule Tidewake.Webhooks do
   alias Tidewake.Webhooks.{
     ManualRetryActor,
     ManualRetryIdempotency,
+    ManualRetryJobs,
     ManualRetryPolicy,
     ManualRetryRequest
   }
@@ -331,7 +332,7 @@ defmodule Tidewake.Webhooks do
              next_attempt_at: nil
            })
            |> Repo.update(@repo_opts),
-         {:ok, job} <- pending |> new_delivery_job() |> Oban.insert(@repo_opts) do
+         {:ok, job} <- pending |> new_delivery_job() |> ManualRetryJobs.insert() do
       if job.conflict?, do: Repo.rollback(:active_job)
     else
       {:error, reason} -> Repo.rollback(reason)

@@ -36,6 +36,9 @@ defmodule TidewakeWeb.Endpoint do
     plug Phoenix.Ecto.CheckRepoStatus, otp_app: :tidewake
   end
 
+  # Keep retry credentials, keys and body out of generic request instrumentation.
+  plug TidewakeWeb.Plugs.ManualRetryRequest
+
   plug Phoenix.LiveDashboard.RequestLogger,
     param_key: "request_logger",
     cookie_key: "request_logger"

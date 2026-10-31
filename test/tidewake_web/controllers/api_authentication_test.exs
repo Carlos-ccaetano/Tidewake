@@ -152,7 +152,7 @@ defmodule TidewakeWeb.ApiAuthenticationTest do
     refute response.resp_body =~ token
   end
 
-  test "protected route inventory has no retry, audit or credential-management route" do
+  test "protected route inventory includes retry POST without audit or credential management" do
     routes =
       Phoenix.Router.routes(TidewakeWeb.Router)
       |> Enum.filter(&String.starts_with?(&1.path, "/api/"))
@@ -167,6 +167,7 @@ defmodule TidewakeWeb.ApiAuthenticationTest do
                {:get, "/api/events/:id/deliveries"},
                {:post, "/api/events"},
                {:post, "/api/endpoints"},
+               {:post, "/api/deliveries/:delivery_id/manual-retry-requests"},
                {:patch, "/api/endpoints/:id"}
              ])
   end
