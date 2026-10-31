@@ -13,6 +13,42 @@ defmodule Tidewake.WebhooksFixtures do
 
   def legacy_project, do: Tidewake.Projects.get_project_by_slug("legacy")
 
+  def manual_retry_audit_fixture(delivery, attrs \\ %{}) do
+    digest = :crypto.hash(:sha256, Ecto.UUID.generate()) |> Base.encode16(case: :lower)
+
+    identity =
+      Map.take(attrs, [:actor_type, :actor_subject, :source, :request_fingerprint_version])
+
+    request =
+      struct!(
+        %ManualRetryRequest{
+          delivery_id: delivery.id,
+          actor_type: "service_account",
+          actor_subject: Ecto.UUID.generate(),
+          source: "api",
+          idempotency_key_digest: digest,
+          request_fingerprint: String.duplicate("f", 64),
+          request_fingerprint_version: 1
+        },
+        identity
+      )
+
+    decision =
+      Map.merge(
+        %{
+          requested_at: DateTime.utc_now(),
+          outcome: "rejected",
+          reason: "state_not_failed",
+          observed_status: "pending",
+          observed_attempt_count: 0,
+          observed_retry_cycle: 0
+        },
+        attrs
+      )
+
+    request |> ManualRetryRequest.changeset(decision) |> Repo.insert!(@opts)
+  end
+
   def retry_scope_fixture(%{unboxed: true}) do
     identity =
       Sandbox.unboxed_run(Repo, fn ->

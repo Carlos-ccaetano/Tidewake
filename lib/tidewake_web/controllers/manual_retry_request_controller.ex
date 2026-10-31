@@ -8,6 +8,73 @@ defmodule TidewakeWeb.ManualRetryRequestController do
 
   @reasons ~w(state_not_failed endpoint_inactive manual_cycle_limit_reached)
 
+  def index(conn, %{"delivery_id" => id}) do
+    with {:ok, delivery_id} <- delivery_id(id),
+         {:ok, options} <- audit_options(conn.query_string) do
+      {valid_body?, conn} = absent_body(conn)
+
+      if valid_body?,
+        do:
+          audit_result(
+            conn,
+            Webhooks.list_manual_retry_audit(conn.assigns.current_scope, delivery_id, options)
+          ),
+        else: invalid_request(conn)
+    else
+      _invalid -> invalid_request(conn)
+    end
+  end
+
+  defp audit_options(query) do
+    pairs = query |> URI.query_decoder() |> Enum.to_list()
+    values = Map.new(pairs)
+
+    with true <- length(pairs) == map_size(values),
+         true <- Enum.all?(pairs, fn {key, _value} -> key in ["limit", "before_id"] end),
+         {:ok, limit} <- optional_audit_integer(values["limit"], 50),
+         true <- limit <= 100,
+         {:ok, cursor} <- optional_audit_integer(values["before_id"], nil) do
+      {:ok, %{limit: limit, before_id: cursor}}
+    else
+      _invalid -> {:error, :invalid_request}
+    end
+  rescue
+    ArgumentError -> {:error, :invalid_request}
+  end
+
+  defp optional_audit_integer(nil, default), do: {:ok, default}
+  defp optional_audit_integer(value, _default), do: delivery_id(value)
+
+  defp absent_body(conn) do
+    case read_body(conn, length: 1, read_length: 1, read_timeout: 1000) do
+      {:ok, "", conn} -> {true, conn}
+      {:ok, _body, conn} -> {false, conn}
+      {:more, _body, conn} -> {false, conn}
+      {:error, _reason} -> {false, conn}
+    end
+  end
+
+  defp audit_result(conn, {:ok, %{data: data, page: page}}) do
+    data =
+      Enum.map(data, fn row ->
+        %{
+          id: row.id,
+          delivery_id: row.delivery_id,
+          outcome: row.outcome,
+          reason: row.reason,
+          requested_at: DateTime.to_iso8601(row.requested_at),
+          resulting_retry_cycle: row.resulting_retry_cycle,
+          actor_type: row.actor_type,
+          actor_subject: row.actor_subject,
+          source: row.source
+        }
+      end)
+
+    json(conn, %{data: data, page: page})
+  end
+
+  defp audit_result(conn, {:error, _reason} = result), do: command_result(conn, result)
+
   def create(conn, %{"delivery_id" => id}) do
     scope = conn.assigns.current_scope
 

@@ -59,13 +59,39 @@ defmodule TidewakeWeb.ManualRetryTransportTest do
           replay = request(url, identity.issued.token)
           invalid = request(url, identity.issued.token, ~s({"body_marker":"private"}))
           unauthorized = request(url, "invalid", "{invalid")
+
+          audit =
+            Req.get!(url <> "?limit=1",
+              retry: false,
+              headers: [
+                {"authorization", "Bearer " <> identity.issued.token},
+                {"idempotency-key", @key},
+                {"connection", "close"}
+              ]
+            )
+
+          head_response =
+            Req.head!(url,
+              retry: false,
+              headers: [
+                {"authorization", "Bearer " <> identity.issued.token},
+                {"connection", "close"}
+              ]
+            )
+
           assert first.status == 202
           assert replay.status == 202
           assert replay.body == put_in(first.body, ["data", "replayed"], true)
           assert invalid.status == 400
           assert unauthorized.status == 401
+          assert audit.status == 200
+          assert head_response.status == 200
+          assert head_response.body == ""
+          assert [historical] = audit.body["data"]
+          assert historical["actor_subject"] == identity.account.public_id
+          assert audit.body["page"] == %{"next_before_id" => nil}
 
-          for response <- [first, replay, invalid, unauthorized] do
+          for response <- [first, replay, invalid, unauthorized, audit, head_response] do
             assert response.headers["cache-control"] == ["no-store"]
           end
         end)

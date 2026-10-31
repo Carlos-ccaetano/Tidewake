@@ -169,7 +169,7 @@ defmodule TidewakeWeb.ApiIsolationRegressionTest do
     assert {:query, "endpoints"} in observations
   end
 
-  test "route inventory and permission pipelines include retry POST without delete or audit GET" do
+  test "route inventory and permission pipelines include retry POST and audit GET without delete" do
     expected =
       for {method, path, controller, action, _permission, _lookup, _status, _roles} <- @routes do
         {method, path, controller, action}
@@ -185,7 +185,11 @@ defmodule TidewakeWeb.ApiIsolationRegressionTest do
       {:post, "/api/deliveries/:delivery_id/manual-retry-requests", ManualRetryRequestController,
        :create}
 
-    assert Enum.sort(actual) == Enum.sort([retry_route | expected])
+    audit_route =
+      {:get, "/api/deliveries/:delivery_id/manual-retry-requests", ManualRetryRequestController,
+       :index}
+
+    assert Enum.sort(actual) == Enum.sort([retry_route, audit_route | expected])
 
     retry_info =
       Phoenix.Router.route_info(
@@ -196,6 +200,16 @@ defmodule TidewakeWeb.ApiIsolationRegressionTest do
       )
 
     assert retry_info.pipe_through == [:manual_retries]
+
+    audit_info =
+      Phoenix.Router.route_info(
+        TidewakeWeb.Router,
+        "GET",
+        "/api/deliveries/1/manual-retry-requests",
+        "www.example.com"
+      )
+
+    assert audit_info.pipe_through == [:manual_retry_audit]
 
     for {method, path, _controller, _action, permission, _lookup, _status, _roles} <- @routes do
       info =
