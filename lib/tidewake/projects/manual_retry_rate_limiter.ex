@@ -14,12 +14,25 @@ defmodule Tidewake.Projects.ManualRetryRateLimiter do
 
   @repo_opts [log: false, telemetry_event: nil]
   @interval_us 12_000_000
+  @admission [:tidewake, :webhooks, :manual_retry, :admission]
 
   @spec consume(integer(), DateTime.t() | nil) ::
           :allowed | {:denied, pos_integer()} | {:error, :unavailable}
-  def consume(service_account_id, now \\ nil)
+  def consume(service_account_id, now \\ nil) do
+    result = do_consume(service_account_id, now)
 
-  def consume(id, now) when is_integer(id) and id > 0 and id <= 9_223_372_036_854_775_807 do
+    outcome =
+      case result do
+        :allowed -> "allowed"
+        {:denied, _seconds} -> "denied"
+        {:error, :unavailable} -> "error"
+      end
+
+    :telemetry.execute(@admission, %{count: 1}, %{outcome: outcome})
+    result
+  end
+
+  defp do_consume(id, now) when is_integer(id) and id > 0 and id <= 9_223_372_036_854_775_807 do
     with true <- valid_clock?(now) and not Repo.in_transaction?(),
          {:ok, result} <- Repo.transaction(fn -> consume_locked(id, now) end, @repo_opts) do
       result
@@ -30,7 +43,7 @@ defmodule Tidewake.Projects.ManualRetryRateLimiter do
     _failure -> {:error, :unavailable}
   end
 
-  def consume(_id, _now), do: {:error, :unavailable}
+  defp do_consume(_id, _now), do: {:error, :unavailable}
 
   defp consume_locked(id, injected_now) do
     Repo.query!(

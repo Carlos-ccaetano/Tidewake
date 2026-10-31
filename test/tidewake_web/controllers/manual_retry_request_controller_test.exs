@@ -15,11 +15,47 @@ defmodule TidewakeWeb.ManualRetryRequestControllerTest do
   @key "manual-retry-http-key-0001"
   @opts [log: false, telemetry_event: nil]
   @fields ~w(id delivery_id outcome reason requested_at resulting_retry_cycle replayed)
+  @admission [:tidewake, :webhooks, :manual_retry, :admission]
 
   setup tags do
     Process.put(:oban_testing, :manual)
     identity = service_account_fixture(Map.get(tags, :role, "admin"))
     Map.merge(identity, delivery_fixture(identity.project))
+  end
+
+  test "admission counts POST, replay and admitted invalid input, excluding GET and denied authority",
+       ctx do
+    handler = {__MODULE__, make_ref()}
+    :ok = :telemetry.attach(handler, @admission, &__MODULE__.admission_event/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert request(ctx, auth: []).status == 401
+    viewer = service_account_fixture("viewer", ctx.project)
+    assert request(ctx, auth: ["Bearer " <> viewer.issued.token]).status == 403
+
+    read =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> ctx.issued.token)
+      |> get("/api/deliveries/#{ctx.delivery.id}/manual-retry-requests")
+
+    assert read.status == 200
+    refute_received {:admission, _, _}
+
+    for {keys, status} <- [
+          {[@key], 202},
+          {[@key], 202},
+          {["bad"], 400},
+          {[@key], 202},
+          {[@key], 202}
+        ] do
+      assert request(ctx, keys: keys).status == status
+      assert_received {:admission, %{count: 1}, %{outcome: "allowed"}}
+      refute_received {:admission, _, _}
+    end
+
+    assert request(ctx).status == 429
+    assert_received {:admission, %{count: 1}, %{outcome: "denied"}}
+    refute_received {:admission, _, _}
   end
 
   test "acceptance commits audit, transition and one complete job without changing attempts",
@@ -596,6 +632,10 @@ defmodule TidewakeWeb.ManualRetryRequestControllerTest do
     assert [content_type] = get_resp_header(response, "content-type")
     assert content_type =~ "application/json"
     response
+  end
+
+  def admission_event(_event, measurements, metadata, parent) do
+    if self() == parent, do: send(parent, {:admission, measurements, metadata})
   end
 
   def query_event(
