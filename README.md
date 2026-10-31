@@ -14,7 +14,7 @@ Automatic retries use explicit transient and permanent classifications, a six-at
 
 The manual retry command requires an authenticated project Scope and current admin authority, including on replay. `Tidewake.Webhooks.request_manual_retry/3` uses project-bound version-2 fingerprints and digest-only actor-scoped idempotency. Acceptance atomically commits its audit record, delivery transition and immediate cycle-aware job; rejection records only its decision, and replay creates no additional work. PostgreSQL locks and uniqueness arbitrate concurrent requests. Lifetime attempt history is preserved, with at most three manual cycles after the original automatic cycle.
 
-Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The POST contract](docs/api/manual-retries.md) documents the minimal response and errors. Audit GET remains pending until P32; retry UI, receiver `Retry-After` handling, retention and payload policy, human users, secret rotation, metrics reporting, external alerts and production deployment remain future work.
+Admins can use `POST /api/deliveries/:delivery_id/manual-retry-requests` with one Idempotency-Key and an absent body or empty JSON object. A durable account bucket allows five requests and refills one token every 12 seconds; replays and admitted input errors also consume capacity. Every response is JSON with `Cache-Control: no-store`, and foreign/absent deliveries share one 404. [The API contract](docs/api/manual-retries.md) documents POST and the admin-only GET on the same path. GET returns historical audit snapshots with id-descending cursor pagination (default 50, maximum 100), never consumes the POST bucket and uses the same non-disclosing 404 and no-store policy. Retry UI, receiver `Retry-After` handling, retention and payload policy, human users, secret rotation, metrics reporting, external alerts and production deployment remain future work.
 
 ## Relationship with Ironhold
 
@@ -32,7 +32,6 @@ Each Tidewake attempt uses a fresh timestamp and signature. Ironhold acknowledge
 
 Tidewake accepts and retrieves individual events through its HTTP API, manages destination endpoints, and persists each accepted event with initial delivery work for active endpoints in the authenticated project in one transaction. With no active endpoints, the event is still accepted without deliveries or jobs. The production adapter can deliver signed requests through the guarded Req transport when deployed and configured. Automatic retries already classify transient outcomes, apply bounded exponential backoff with equal jitter, reject stale or duplicate jobs during claim, and persist each failed attempt, pending delivery state, and successor job atomically. The broader architecture will eventually:
 
-- expose authorized retrieval of the existing manual retry audit records;
 - support delivery `Retry-After` where appropriate;
 - define retention and payload policy;
 - expose operational history through Phoenix LiveView;
@@ -220,7 +219,7 @@ Implemented endpoint, event, delivery, attempt, transactional fan-out, attempt-a
 
 1. Foundation: Phoenix, PostgreSQL, Oban, Req, quality tools, CI, and documentation.
 2. First vertical slice: event ingestion, persistence, an Oban job, a recorded attempt, API authentication, and stale-delivery recovery. Complete for the deterministic local path.
-3. Outbound HTTP delivery, bounded automatic retries, authenticated admin manual retry POST, per-account retry admission, service-account identity, project ownership and route authorization are implemented. The reliability milestone remains in progress while audit retrieval, receiver `Retry-After` handling, retention and payload policy, and related hardening remain pending.
+3. Outbound HTTP delivery, bounded automatic retries, authenticated admin manual retry POST, per-account retry admission, service-account identity, project ownership and route authorization are implemented. The reliability milestone remains in progress while receiver `Retry-After` handling, retention and payload policy, and related hardening remain pending.
 4. LiveView history, metrics, logs, and audit capabilities.
 5. Operational hardening and production deployment guidance.
 

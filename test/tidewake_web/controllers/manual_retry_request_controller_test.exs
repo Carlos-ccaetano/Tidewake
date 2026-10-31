@@ -3,6 +3,9 @@ defmodule TidewakeWeb.ManualRetryRequestControllerTest do
 
   import ExUnit.CaptureLog, only: [capture_log: 1]
 
+  import Tidewake.WebhooksFixtures,
+    only: [manual_retry_audit_fixture: 1, manual_retry_audit_fixture: 2]
+
   alias Tidewake.{Projects, Repo, Webhooks}
   alias Tidewake.Projects.ManualRetryRateLimit
   alias Tidewake.Webhooks.{Delivery, ManualRetryRequest}
@@ -298,6 +301,7 @@ defmodule TidewakeWeb.ManualRetryRequestControllerTest do
           accepted = request(ctx)
           replay = request(ctx)
           invalid = request(ctx, body: ~s({"private_body_marker":"secret"}))
+          assert audit_get(ctx).status == 200
           send(self(), {:responses, [accepted.resp_body, replay.resp_body, invalid.resp_body]})
         end)
 
@@ -330,13 +334,268 @@ defmodule TidewakeWeb.ManualRetryRequestControllerTest do
     end
   end
 
-  test "there is no GET audit route" do
-    assert Phoenix.Router.route_info(
-             TidewakeWeb.Router,
-             "GET",
-             "/api/deliveries/1/manual-retry-requests",
-             "www.example.com"
-           ) == :error
+  test "GET audit uses its own admin permission pipeline" do
+    info =
+      Phoenix.Router.route_info(
+        TidewakeWeb.Router,
+        "GET",
+        "/api/deliveries/1/manual-retry-requests",
+        "www.example.com"
+      )
+
+    assert info.plug == TidewakeWeb.ManualRetryRequestController
+    assert info.plug_opts == :index
+    assert info.pipe_through == [:manual_retry_audit]
+  end
+
+  test "GET returns only nine historical fields for its authorized delivery", ctx do
+    rows = [
+      manual_retry_audit_fixture(ctx.delivery, %{
+        outcome: "accepted",
+        reason: nil,
+        observed_status: "failed",
+        resulting_retry_cycle: 1,
+        actor_type: "user",
+        actor_subject: "opaque-retired-actor",
+        source: "admin_cli"
+      }),
+      manual_retry_audit_fixture(ctx.delivery),
+      manual_retry_audit_fixture(ctx.delivery, %{
+        reason: "endpoint_inactive",
+        source: "liveview",
+        request_fingerprint_version: 2
+      }),
+      manual_retry_audit_fixture(ctx.delivery, %{
+        reason: "manual_cycle_limit_reached",
+        request_fingerprint_version: 2
+      })
+    ]
+
+    other = delivery_fixture(ctx.project)
+    hidden = manual_retry_audit_fixture(other.delivery)
+    response = audit_get(ctx)
+    assert %{"data" => data, "page" => %{"next_before_id" => nil}} = json_response(response, 200)
+    assert Enum.map(data, & &1["id"]) == Enum.map(Enum.reverse(rows), & &1.id)
+    refute hidden.id in Enum.map(data, & &1["id"])
+
+    fields =
+      ~w(id delivery_id outcome reason requested_at resulting_retry_cycle actor_type actor_subject source)
+
+    for {item, row} <- Enum.zip(data, Enum.reverse(rows)) do
+      assert Enum.sort(Map.keys(item)) == Enum.sort(fields)
+      assert item["actor_subject"] == row.actor_subject
+      assert item["actor_type"] == row.actor_type
+      assert item["source"] == row.source
+      assert item["reason"] == row.reason
+      assert item["requested_at"] == DateTime.to_iso8601(row.requested_at)
+
+      for sensitive <- [
+            row.idempotency_key_digest,
+            row.request_fingerprint,
+            ctx.issued.token,
+            ctx.endpoint.url,
+            "private_payload_marker"
+          ] do
+        refute response.resp_body =~ sensitive
+      end
+    end
+
+    assert bucket(ctx) == nil
+  end
+
+  test "GET defaults to fifty, accepts one hundred and computes lookahead cursor", ctx do
+    rows = for _ <- 1..101, do: manual_retry_audit_fixture(ctx.delivery)
+
+    assert %{"data" => first, "page" => %{"next_before_id" => cursor}} =
+             audit_get(ctx) |> json_response(200)
+
+    assert length(first) == 50
+    assert cursor == List.last(first)["id"]
+
+    assert %{"data" => maximum, "page" => %{"next_before_id" => max_cursor}} =
+             audit_get(ctx, query: "?limit=100") |> json_response(200)
+
+    assert length(maximum) == 100
+    assert max_cursor == Enum.at(rows, 1).id
+
+    assert %{"data" => [last], "page" => %{"next_before_id" => nil}} =
+             audit_get(ctx, query: "?before_id=#{max_cursor}&limit=100") |> json_response(200)
+
+    assert last["id"] == hd(rows).id
+    assert bucket(ctx) == nil
+  end
+
+  test "GET cursor is exclusive and new inserts do not change continuation", ctx do
+    rows = for _ <- 1..3, do: manual_retry_audit_fixture(ctx.delivery)
+    first = audit_get(ctx, query: "?limit=1") |> json_response(200)
+    assert Enum.map(first["data"], & &1["id"]) == [List.last(rows).id]
+    cursor = first["page"]["next_before_id"]
+    newer = manual_retry_audit_fixture(ctx.delivery)
+    second = audit_get(ctx, query: "?before_id=#{cursor}&limit=2") |> json_response(200)
+
+    assert Enum.map(second["data"], & &1["id"]) ==
+             rows |> Enum.take(2) |> Enum.reverse() |> Enum.map(& &1.id)
+
+    refute newer.id in Enum.map(second["data"], & &1["id"])
+    assert second["page"]["next_before_id"] == nil
+  end
+
+  test "GET empty pages have null cursor", ctx do
+    assert audit_get(ctx) |> json_response(200) == %{
+             "data" => [],
+             "page" => %{"next_before_id" => nil}
+           }
+
+    manual_retry_audit_fixture(ctx.delivery)
+
+    assert audit_get(ctx, query: "?before_id=1") |> json_response(200) == %{
+             "data" => [],
+             "page" => %{"next_before_id" => nil}
+           }
+  end
+
+  test "HEAD inherits protected GET semantics without body or admission", ctx do
+    path = "/api/deliveries/#{ctx.delivery.id}/manual-retry-requests"
+
+    response =
+      build_conn() |> put_req_header("authorization", "Bearer " <> ctx.issued.token) |> head(path)
+
+    assert response(response, 200) == ""
+    assert get_resp_header(response, "cache-control") == ["no-store"]
+    denied = build_conn() |> head(path)
+    assert response(denied, 401) == ""
+    assert get_resp_header(denied, "cache-control") == ["no-store"]
+    assert bucket(ctx) == nil
+  end
+
+  for role <- ~w(producer viewer) do
+    @tag role: role
+    test "GET denies #{role} before pagination, body or object lookup", ctx do
+      manual_retry_audit_fixture(ctx.delivery, %{actor_subject: "admin-only-subject"})
+
+      response =
+        audit_get(ctx, id: 9_223_372_036_854_775_807, query: "?limit=invalid", body: "private")
+
+      assert error_code(response, 403) == "forbidden"
+      refute response.resp_body =~ "admin-only-subject"
+      assert bucket(ctx) == nil
+    end
+  end
+
+  test "GET invalid and revoked credentials receive 401 without admission", ctx do
+    for auth <- [[], ["Bearer invalid"]] do
+      assert error_code(audit_get(ctx, auth: auth, query: "?limit=bad"), 401) == "unauthorized"
+    end
+
+    {:ok, _} =
+      Projects.revoke_credential(ctx.account, ctx.issued.credential.public_id, DateTime.utc_now())
+
+    assert error_code(audit_get(ctx), 401) == "unauthorized"
+    assert bucket(ctx) == nil
+  end
+
+  test "GET foreign and absent deliveries have identical non-disclosing 404", ctx do
+    other = service_account_fixture()
+    foreign = delivery_fixture(other.project)
+    row = manual_retry_audit_fixture(foreign.delivery)
+    hidden = audit_get(ctx, id: foreign.delivery.id)
+    absent = audit_get(ctx, id: 9_223_372_036_854_775_807)
+    assert json_response(hidden, 404) == json_response(absent, 404)
+    refute hidden.resp_body =~ row.actor_subject
+    assert bucket(ctx) == nil
+  end
+
+  test "GET rejects duplicate, unknown and malformed pagination without silently clamping", ctx do
+    for query <- [
+          "?limit=0",
+          "?limit=-1",
+          "?limit=101",
+          "?limit=01",
+          "?limit=1.0",
+          "?limit=",
+          "?limit=%201",
+          "?limit=%2B1",
+          "?limit=1&limit=1",
+          "?limit=1&%6cimit=2",
+          "?limit[]=1",
+          "?before_id=0",
+          "?before_id=-1",
+          "?before_id=01",
+          "?before_id=x",
+          "?before_id=",
+          "?before_id=9223372036854775808",
+          "?before_id=1&before_id=2",
+          "?unknown=1",
+          "?actor_subject=spoof",
+          "?limit=%FF",
+          "?limit=%GG"
+        ] do
+      assert error_code(audit_get(ctx, query: query), 400) == "invalid_request"
+    end
+
+    assert bucket(ctx) == nil
+  end
+
+  test "GET rejects noncanonical IDs and any body", ctx do
+    for id <- ["0", "01", "-1", "+1", "1x", "9223372036854775808"] do
+      assert error_code(audit_get(ctx, id: id), 400) == "invalid_request"
+    end
+
+    for body <- ["{}", " ", "null", ~s({"actor_subject":"spoof"})] do
+      assert error_code(audit_get(ctx, body: body), 400) == "invalid_request"
+    end
+
+    assert bucket(ctx) == nil
+  end
+
+  test "GET leaves an existing exhausted bucket unchanged", ctx do
+    for _ <- 1..5, do: assert(request(ctx).status == 202)
+    before_bucket = bucket(ctx)
+    assert before_bucket.tokens == 0
+    assert audit_get(ctx).status == 200
+    assert audit_get(ctx, query: "?limit=0").status == 400
+    assert audit_get(ctx, id: 9_223_372_036_854_775_807).status == 404
+    assert bucket(ctx) == before_bucket
+  end
+
+  test "GET storage error is generic 503 without creating a bucket", ctx do
+    Repo.query!("ALTER TABLE manual_retry_requests RENAME TO http_audit_read_failure", [], @opts)
+
+    try do
+      response = audit_get(ctx)
+      assert error_code(response, 503) == "service_unavailable"
+      refute response.resp_body =~ "http_audit_read_failure"
+      assert bucket(ctx) == nil
+    after
+      Repo.query!(
+        "ALTER TABLE http_audit_read_failure RENAME TO manual_retry_requests",
+        [],
+        @opts
+      )
+    end
+
+    assert audit_get(ctx).status == 200
+  end
+
+  defp audit_get(ctx, options \\ []) do
+    headers =
+      for value <- Keyword.get(options, :auth, ["Bearer " <> ctx.issued.token]),
+          do: {"authorization", value}
+
+    path =
+      "/api/deliveries/#{Keyword.get(options, :id, ctx.delivery.id)}/manual-retry-requests" <>
+        Keyword.get(options, :query, "")
+
+    response =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> prepend_req_headers(headers)
+      |> get(path, Keyword.get(options, :body, ""))
+
+    assert get_resp_header(response, "cache-control") == ["no-store"]
+    assert [content_type] = get_resp_header(response, "content-type")
+    assert content_type =~ "application/json"
+    response
   end
 
   def query_event(

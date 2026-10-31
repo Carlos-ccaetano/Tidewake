@@ -10,10 +10,13 @@ defmodule TidewakeWeb.Plugs.ManualRetryRequest do
   def init(options), do: options
 
   @impl Plug
-  def call(%{method: "POST"} = conn, _options) do
-    case Phoenix.Router.route_info(Router, conn.method, conn.path_info, conn.host) do
-      %{plug: ManualRetryRequestController, plug_opts: :create, path_params: params} ->
-        dispatch(conn, params)
+  def call(%{method: method} = conn, _options) when method in ["POST", "GET", "HEAD"] do
+    method = if method == "HEAD", do: "GET", else: method
+
+    case Phoenix.Router.route_info(Router, method, conn.path_info, conn.host) do
+      %{plug: ManualRetryRequestController, plug_opts: action, path_params: params}
+      when action in [:create, :index] ->
+        dispatch(Plug.Head.call(conn, []), params, action)
 
       _other_route ->
         conn
@@ -22,17 +25,20 @@ defmodule TidewakeWeb.Plugs.ManualRetryRequest do
 
   def call(conn, _options), do: conn
 
-  defp dispatch(conn, params) do
+  defp dispatch(conn, params, action) do
+    conn = put_resp_header(conn, "cache-control", "no-store")
+
     conn =
-      conn
-      |> put_resp_header("cache-control", "no-store")
-      |> Router.manual_retries([])
+      case action do
+        :create -> Router.manual_retries(conn, [])
+        :index -> Router.manual_retry_audit(conn, [])
+      end
 
     if conn.halted do
       conn
     else
       %{conn | params: params, path_params: params}
-      |> ManualRetryRequestController.call(:create)
+      |> ManualRetryRequestController.call(action)
       |> halt()
     end
   end

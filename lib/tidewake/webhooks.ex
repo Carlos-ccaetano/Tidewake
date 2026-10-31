@@ -26,6 +26,7 @@ defmodule Tidewake.Webhooks do
   @manual_retry_rejection_reasons ~w(state_not_failed endpoint_inactive manual_cycle_limit_reached)
   @max_stale_delivery_batch_size 100
   @repo_opts [log: false, telemetry_event: nil]
+  @manual_retry_audit_fields ~w(id delivery_id outcome reason requested_at resulting_retry_cycle actor_type actor_subject source)a
   @attempt_identity_keys [
     :delivery_id,
     "delivery_id",
@@ -87,6 +88,65 @@ defmodule Tidewake.Webhooks do
   @doc "Internal ID lookup for persisted work; never an HTTP access boundary."
   def get_delivery_internal(id) do
     Repo.get(Delivery, id)
+  end
+
+  @doc "Reads bounded historical audit snapshots after current admin and project authorization."
+  def list_manual_retry_audit(scope, delivery_id, options \\ %{limit: 50, before_id: nil}) do
+    cond do
+      not Scope.valid?(scope) or not Authorization.allowed?(scope, :manual_retry_audit_read) ->
+        {:error, :forbidden}
+
+      not valid_manual_retry_audit_options?(delivery_id, options) ->
+        {:error, :invalid_arguments}
+
+      true ->
+        Repo.transaction(
+          fn -> scoped_manual_retry_audit(scope, delivery_id, options) end,
+          @repo_opts
+        )
+    end
+  rescue
+    _error in [
+      Postgrex.Error,
+      Ecto.ConstraintError,
+      Ecto.StaleEntryError,
+      DBConnection.ConnectionError
+    ] ->
+      {:error, :persistence_error}
+  end
+
+  defp valid_manual_retry_audit_options?(id, %{limit: limit, before_id: cursor} = options)
+       when map_size(options) == 2 and is_integer(id) and id > 0 and
+              id <= 9_223_372_036_854_775_807 and
+              is_integer(limit) and limit in 1..100 do
+    is_nil(cursor) or (is_integer(cursor) and cursor > 0 and cursor <= 9_223_372_036_854_775_807)
+  end
+
+  defp valid_manual_retry_audit_options?(_id, _options), do: false
+
+  defp scoped_manual_retry_audit(scope, delivery_id, %{limit: limit, before_id: cursor}) do
+    if Scope.revalidate(scope) != :ok, do: Repo.rollback(:forbidden)
+
+    delivery =
+      from(d in Delivery,
+        where: d.id == ^delivery_id and d.project_id == ^scope.project_id,
+        select: d.id
+      )
+
+    if is_nil(Repo.one(delivery, @repo_opts)), do: Repo.rollback(:not_found)
+
+    query =
+      from(r in ManualRetryRequest,
+        where: r.delivery_id == ^delivery_id,
+        order_by: [desc: r.id],
+        limit: ^(limit + 1),
+        select: map(r, @manual_retry_audit_fields)
+      )
+
+    query = if cursor, do: from(r in query, where: r.id < ^cursor), else: query
+    {data, more} = query |> Repo.all(@repo_opts) |> Enum.split(limit)
+    next = if more == [], do: nil, else: List.last(data).id
+    %{data: data, page: %{next_before_id: next}}
   end
 
   @doc """
