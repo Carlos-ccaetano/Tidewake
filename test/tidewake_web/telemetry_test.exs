@@ -10,6 +10,7 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :event, :rejected, :count],
     [:tidewake, :webhooks, :manual_retry, :completed, :count],
     [:tidewake, :webhooks, :manual_retry, :completed, :duration_ms],
+    [:tidewake, :webhooks, :manual_retry, :admission, :count],
     [:tidewake, :webhooks, :delivery, :processed, :count],
     [:tidewake, :webhooks, :delivery, :processed, :duration_ms],
     [:tidewake, :webhooks, :delivery, :cancelled, :count],
@@ -116,8 +117,14 @@ defmodule TidewakeWeb.TelemetryTest do
     end)
   end
 
-  test "defines manual retry completion count and duration with only bounded tags" do
+  test "defines manual retry admission and completion metrics with only bounded tags" do
     metrics = Telemetry.metrics()
+
+    assert %Counter{
+             event_name: [:tidewake, :webhooks, :manual_retry, :admission],
+             measurement: :count,
+             tags: [:outcome]
+           } = metric!(metrics, "tidewake.webhooks.manual_retry.admission.count")
 
     assert %Counter{
              event_name: [:tidewake, :webhooks, :manual_retry, :completed],

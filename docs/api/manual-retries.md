@@ -109,7 +109,13 @@ Every response, including errors, uses JSON and `Cache-Control: no-store`. Non-d
 
 POST enforces authentication → permission → limiter → input validation → scoped command. GET enforces authentication → permission → input validation → scoped audit read, without the limiter. The controller performs no global Delivery lookup. The context revalidates persisted authority; POST then locks Delivery and Endpoint within the trusted project before resolving the key or deciding eligibility. Audit, accepted state and work commit atomically; storage failures return 503 with full domain rollback.
 
-Responses never disclose raw keys, digests, fingerprints, fingerprint version, credentials, internal account/project IDs, endpoint URLs, payloads, bucket balances, changesets, constraints or exceptions. Opaque actor_subject is intentionally returned only in authorized audit items; it is absent from POST decisions, errors, logs and instrumentation. Generic connection-bearing transport/request spans are omitted for this boundary; bounded domain completion and queue-only notifications remain. Deployment, TLS topology, secret distribution and audit retention require their separate operational work.
+Responses never disclose raw keys, digests, fingerprints, fingerprint version, credentials, internal account/project IDs, endpoint URLs, payloads, bucket balances, changesets, constraints or exceptions. Opaque actor_subject is intentionally returned only in authorized audit items; it is absent from POST decisions, errors, logs and instrumentation. Generic connection-bearing transport/request spans are omitted for this boundary; bounded admission and domain completion events, alongside queue-only notifications, remain. Deployment, TLS topology, secret distribution and audit retention require their separate operational work.
+
+## Admission telemetry
+
+Each `ManualRetryRateLimiter.consume/2` call emits exactly one `[:tidewake, :webhooks, :manual_retry, :admission]` event after its result, with measurements exactly `%{count: 1}` and metadata exactly `%{outcome: outcome}`, where outcome is one of `"allowed"`, `"denied"` or `"error"`. `allowed` follows committed admission, `denied` follows an exhausted bucket, and `error` represents an unavailable result, including invalid internal input or persistence failure. No account/project identity, token, key, balance, clock or Retry-After value is included.
+
+`tidewake.webhooks.manual_retry.admission.count` is a counter with only the `outcome` tag and three possible values. It counts admission, not successful retry commands: admitted replays and invalid POST input also count as allowed; GET and authentication/permission denials never invoke the limiter. The existing completion metrics describe the subsequent domain command separately. These event/metric definitions do not install an exporter, reporter or alerts.
 
 ## Remaining limits and evidence
 

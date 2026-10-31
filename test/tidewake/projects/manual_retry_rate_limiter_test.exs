@@ -13,8 +13,15 @@ defmodule Tidewake.Projects.ManualRetryRateLimiterTest do
   @now ~U[2026-10-30 12:00:00.000000Z]
   @opts [log: false, telemetry_event: nil]
   @timeout 10_000
+  @admission [:tidewake, :webhooks, :manual_retry, :admission]
 
   setup tags do
+    if tags[:admission_telemetry] do
+      handler = {__MODULE__, make_ref()}
+      :ok = :telemetry.attach(handler, @admission, &__MODULE__.admission_event/4, self())
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
     if tags[:unboxed] do
       identity = Sandbox.unboxed_run(Repo, &service_account_fixture/0)
       on_exit(fn -> cleanup(identity) end)
@@ -31,6 +38,53 @@ defmodule Tidewake.Projects.ManualRetryRateLimiterTest do
     assert ManualRetryRateLimiter.consume(account.id, @now) == :allowed
     assert %ManualRetryRateLimit{tokens: 4, refilled_at: @now} = bucket(account)
     assert Repo.aggregate(ManualRetryRateLimit, :count) == 1
+  end
+
+  @tag :admission_telemetry
+  test "each allowed or denied call emits exactly one count with only its bounded outcome", %{
+    account: account
+  } do
+    for _ <- 1..5 do
+      assert ManualRetryRateLimiter.consume(account.id, @now) == :allowed
+      assert_admission("allowed")
+    end
+
+    assert bucket(account).tokens == 0
+    assert ManualRetryRateLimiter.consume(account.id, @now) == {:denied, 12}
+    assert_admission("denied")
+    assert bucket(account).tokens == 0
+  end
+
+  @tag :admission_telemetry
+  test "validation, transaction and persistence failures emit only error without consumption", %{
+    account: account
+  } do
+    for {id, now} <- [{nil, @now}, {account.id, "invalid"}, {9_223_372_036_854_775_807, @now}] do
+      assert ManualRetryRateLimiter.consume(id, now) == {:error, :unavailable}
+      assert_admission("error")
+    end
+
+    assert {:ok, {:error, :unavailable}} =
+             Repo.transaction(fn -> ManualRetryRateLimiter.consume(account.id, @now) end)
+
+    assert_admission("error")
+    assert bucket(account) == nil
+
+    with_rejected_balance(4, fn ->
+      assert ManualRetryRateLimiter.consume(account.id, @now) == {:error, :unavailable}
+      assert_admission("error")
+      assert bucket(account) == nil
+    end)
+
+    assert ManualRetryRateLimiter.consume(account.id, @now) == :allowed
+    assert_admission("allowed")
+    before_failure = bucket(account)
+
+    with_rejected_balance(3, fn ->
+      assert ManualRetryRateLimiter.consume(account.id, @now) == {:error, :unavailable}
+      assert_admission("error")
+      assert bucket(account) == before_failure
+    end)
   end
 
   test "five admissions exhaust capacity and repeated denial leaves zero and the clock intact", %{
@@ -328,6 +382,17 @@ defmodule Tidewake.Projects.ManualRetryRateLimiterTest do
 
   def query_event(_event, _measurements, _metadata, test_pid) do
     if self() == test_pid, do: send(test_pid, :limiter_query_event)
+  end
+
+  def admission_event(_event, measurements, metadata, test_pid) do
+    if self() == test_pid, do: send(test_pid, {:admission, measurements, metadata})
+  end
+
+  defp assert_admission(outcome) do
+    measurements = %{count: 1}
+    metadata = %{outcome: outcome}
+    assert_received {:admission, ^measurements, ^metadata}
+    refute_received {:admission, _, _}
   end
 
   defp exhaust(account) do
