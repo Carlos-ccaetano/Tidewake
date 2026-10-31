@@ -63,6 +63,14 @@ jobs:
       - name: Audit Hex dependencies
         run: mix hex.audit
 
+      - name: Audit pinned Cowlib revision
+        run: |
+          commit="$(git -C deps/cowlib rev-parse HEAD)"
+          curl --fail --silent --show-error --retry 3 --max-time 20 \
+            --json "$(jq -n --arg commit "$commit" '{commit: $commit}')" \
+            https://api.osv.dev/v1/query -o "$RUNNER_TEMP/cowlib-osv.json"
+          jq -e 'type == "object" and (has("vulns") | not)' "$RUNNER_TEMP/cowlib-osv.json"
+
       - name: Check for unused locked dependencies
         run: mix deps.unlock --check-unused
 
