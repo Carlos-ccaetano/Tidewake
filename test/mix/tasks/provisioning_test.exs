@@ -14,6 +14,8 @@ defmodule Tidewake.ProvisioningTasksTest do
   @suspend Mix.Tasks.Tidewake.Projects.Suspend
 
   setup do
+    repo = Process.whereis(Repo)
+    on_exit(fn -> assert Process.whereis(Repo) == repo end)
     {:ok, project} = Projects.create_project(%{name: "Operations", slug: "operations"})
     {:ok, foreign} = Projects.create_project(%{name: "Foreign", slug: "foreign"})
     %{project: project, foreign: foreign}

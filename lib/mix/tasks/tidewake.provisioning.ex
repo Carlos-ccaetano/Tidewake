@@ -12,10 +12,12 @@ defmodule Tidewake.Provisioning do
 
   def run(action, args, switches) do
     opts = parse!(args, switches)
-    Mix.Task.run("app.start")
+    Mix.Task.run("app.config")
 
-    result = execute(action, opts)
-    print_result(result)
+    case Ecto.Migrator.with_repo(Repo, fn _repo -> execute(action, opts) end, mode: :temporary) do
+      {:ok, result, _apps} -> print_result(result)
+      {:error, _reason} -> Mix.raise(@failure)
+    end
   end
 
   defp parse!(args, switches) do
