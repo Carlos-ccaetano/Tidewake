@@ -170,7 +170,7 @@ Completion of this implementation phase does not establish production deployment
 
 ## Next blocks in risk order
 
-1. **Operationally pending — rollout hardening:** establish a migration/cutover runbook, backup/restore validation, operational metrics and alerts without sensitive cardinality. Merged code and green CI do not prove this rollout work complete.
+1. **Rollout hardening:** the [migration/cutover checklist and runbook](operations/migration-cutover.md) are documented, with a **local synthetic rehearsal (2026-10-31)** covering isolated backup/restore and integrity/authorization checks within its stated limits. **Operationally pending:** staging, representative restore validation, real TLS and permissions, behavior under load, operational metrics and alerts without sensitive cardinality, rollout approval and production deployment. Local evidence and green CI do not prove production readiness.
 2. **Operationally pending — retention and disposal:** define and verify policy for manual_retry_requests and obsolete/orphaned rate-limit rows, preserving referential integrity and historical attribution before introducing cleanup.
 3. **Operationally pending — receiver backoff:** support Retry-After received from webhook targets safely inside the cycle-aware scheduler, retaining attempt/cycle bounds and claim guards. The API's own 429 admission response is already implemented and does not supply this receiver behavior.
 4. **Future product decision — human identity:** make an architectural decision for human authentication and authorization before designing access to a future administrative UI.

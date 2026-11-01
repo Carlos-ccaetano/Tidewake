@@ -78,7 +78,7 @@ curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
   -d '{"name":"Ironhold","url":"https://ironhold.example.com/api/webhooks"}'
 ```
 
-The header value above is the public local development value, not a production credential.
+`<service-account-token>` is an intentionally invalid placeholder and cannot authenticate a request. Replace it with a credential issued through [service-account provisioning](authentication.md#provisioning). Treat the real token as a secret: never commit it or expose it in examples. See [authentication and operations](authentication.md) for complete instructions.
 
 Request body:
 
