@@ -96,3 +96,80 @@ jobs:
           test -s priv/static/assets/css/app.css
           test -s priv/static/assets/js/app.js
           jq -e '.latest["assets/css/app.css"] and .latest["assets/js/app.js"]' priv/static/cache_manifest.json > /dev/null
+
+  ironhold-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MIX_ENV: dev
+      IRONHOLD_REVISION: 4c97c8e91f3a04a57e6cd5c6ebd7686c03f08363
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out Tidewake
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned Ironhold
+        uses: actions/checkout@v7
+        with:
+          repository: Carlos-ccaetano/Ironhold
+          ref: ${{ env.IRONHOLD_REVISION }}
+          path: .integration/ironhold
+          persist-credentials: false
+
+      - name: Verify receiver revision
+        run: test "$(git -C .integration/ironhold rev-parse HEAD)" = "$IRONHOLD_REVISION"
+
+      - name: Set up shared integration runtime
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install locked Tidewake dependencies and compile
+        run: |
+          mix deps.get --check-locked
+          mix compile --warnings-as-errors
+          mix format --check-formatted docs/demo/local.exs
+
+      - name: Install locked Ironhold dependencies and compile
+        working-directory: .integration/ironhold
+        run: |
+          mix deps.get --check-locked
+          mix compile --warnings-as-errors
+
+      - name: Verify Ironhold tests on the shared runtime
+        working-directory: .integration/ironhold
+        env:
+          MIX_ENV: test
+        run: mix test
+
+      - name: Check runner success, failure and timeout cleanup
+        run: |
+          python3 --version
+          python3 -O docs/demo/test_run.py RunnerTests
+
+      - name: Run real HTTP contract integration
+        run: python3 -O docs/demo/run.py .integration/ironhold
+
+      - name: Verify controlled contract mismatch fails
+        env:
+          IRONHOLD_CHECKOUT: .integration/ironhold
+        run: python3 -O docs/demo/test_run.py ContractFailureTest
+
+      - name: Verify Ironhold tracked files remain unchanged
+        if: always()
+        run: git -C .integration/ironhold diff --exit-code HEAD

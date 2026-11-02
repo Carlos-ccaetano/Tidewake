@@ -1,6 +1,6 @@
 # Documentation harness only. Run through run.py; never pass secrets as arguments.
 Mix.Task.run("app.config")
-Logger.configure(level: :emergency)
+Logger.configure(level: :warning)
 
 try do
   [role] = System.argv()
@@ -154,6 +154,16 @@ try do
         )
 
       401 = send_signed.(invalid)
+
+      401 =
+        Req.post!("http://127.0.0.1:42631/api/webhooks",
+          body:
+            Jason.encode!(%{id: external_id, type: "demo.created", data: %{synthetic: false}}),
+          headers: [{"content-type", "application/json"} | signed],
+          retry: false,
+          redirect: false
+        ).status
+
       iron_config = Keyword.merge(config, database: "ironhold_demo263_#{input["run"]}")
 
       {:ok, conn} =
@@ -170,7 +180,7 @@ try do
       GenServer.stop(conn)
 
       IO.puts(
-        "DEMO receiver: fresh=202 exact_replay=409 expired=401 invalid_HMAC=401; events/claims=1/2"
+        "DEMO receiver: fresh=202 exact_replay=409 expired=401 invalid_HMAC=401 tampered_payload=401; events/claims=1/2"
       )
     after
       {:ok, _} =
@@ -182,6 +192,7 @@ try do
 
   :ok = Application.stop(app)
   IO.puts("DEMO #{role} STOPPED; retained database #{database}")
+  IO.puts("DEMO #{role} COMPLETE")
 rescue
   _ ->
     # Exceptions may embed request headers. Never print raw exception values.
