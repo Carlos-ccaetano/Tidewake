@@ -29,23 +29,19 @@ Operational UI and human authentication, receiver `Retry-After` handling, retent
 
 ## Documentation
 
-- **Design:** [Architecture](docs/architecture.md) · [Roadmap](docs/roadmap.md)
+- **Design:** [Architecture](docs/architecture.md) · [Tidewake–Ironhold diagram and trust boundaries](docs/architecture.md#tidewakeironhold-delivery-and-trust-boundaries) · [Roadmap](docs/roadmap.md)
 - **API:** [Authentication and credential lifecycle](docs/api/authentication.md) · [Events](docs/api/events.md) · [Endpoints](docs/api/endpoints.md) · [Manual retry and audit](docs/api/manual-retries.md)
 - **Operations and project:** [Migration/cutover and recovery rehearsal](docs/operations/migration-cutover.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
 
 ## Delivery flow
 
-```text
-Client -> Tidewake API -> PostgreSQL -> Oban -> signed HTTP delivery -> Webhook endpoint
-```
+See the [versioned Mermaid architecture diagram](docs/architecture.md#tidewakeironhold-delivery-and-trust-boundaries) for ingestion, PostgreSQL/Oban, signed delivery, retry/recovery and Ironhold's receiving boundary, with implemented and planned capabilities marked separately.
 
 The API acknowledges durable ingestion before delivery runs. Recovery uses at-least-once semantics: a request may be sent again if its outcome was not persisted. Receiver-side idempotency remains necessary.
 
 ## Relationship with Ironhold
 
-Tidewake and [Ironhold](https://github.com/Carlos-ccaetano/Ironhold) are separate systems, repositories, and processes. In the intended integration, Ironhold is one possible webhook consumer:
-
-    Client -> Tidewake -> signed webhook -> Ironhold
+Tidewake and [Ironhold](https://github.com/Carlos-ccaetano/Ironhold) are separate systems, repositories, and processes. In the intended integration, Ironhold is one possible webhook consumer, as shown in the [architecture diagram](docs/architecture.md#tidewakeironhold-delivery-and-trust-boundaries).
 
 This repository does not contain or modify Ironhold. The services run independently; no shared deployment or end-to-end production integration has been demonstrated.
 

@@ -12,15 +12,61 @@ The project-scoped manual retry command and append-only audit persistence are av
 
 ## System boundary
 
-Tidewake is intended to own reliable webhook delivery between a client that publishes an event and an external HTTP endpoint that consumes it.
+### Tidewake–Ironhold delivery and trust boundaries
 
-    Client -> Tidewake API -> PostgreSQL -> Oban -> external endpoint
+This is a logical view of implemented components and their contracts, not a production deployment. [Tidewake](../README.md) owns durable delivery; [Ironhold](https://github.com/Carlos-ccaetano/Ironhold/blob/main/README.md) is one possible independent receiver. Their PostgreSQL stores are logically separate: no shared database, host, network or deployed topology is implied.
 
-Ironhold may be one external endpoint:
+```mermaid
+flowchart TB
+    accTitle: Tidewake to Ironhold delivery and trust boundaries
+    accDescr: A client crosses Tidewake's authenticated API boundary. One PostgreSQL transaction stores the event, deliveries and Oban jobs. Workers sign and send HTTP requests to Ironhold, which verifies the raw bytes and atomically applies replay protection and event idempotency. Tidewake persists outcomes and schedules bounded retries or stale recovery. Dashed boxes identify future work outside the implemented flow.
 
-    Client -> Tidewake -> signed webhook -> Ironhold
+    subgraph client["Client boundary"]
+        publisher["Event publisher<br/>service account"]
+    end
+    subgraph tidewake["Tidewake boundary — implemented"]
+        api["POST /api/events<br/>service account + permission<br/>project-scoped idempotency"]
+        twdb[("PostgreSQL / Tidewake<br/>events + deliveries + oban_jobs")]
+        oban["Oban queues<br/>default / maintenance"]
+        transport["DeliverWebhookWorker<br/>DeliveryProcessor / Req<br/>HMAC-SHA256 + safe HTTP"]
+        outcome["RetryPolicy / RetryBackoff<br/>6 attempts/cycle + jitter"]
+        recovery["Stale recovery worker<br/>≥ 5 min; ≤ 100 per scan"]
+        api -->|"atomic event + deliveries + jobs"| twdb
+        twdb -->|"durable queue"| oban
+        oban -->|"default queue"| transport
+        transport -->|"response / transport error"| outcome
+        outcome -->|"attempt + state + next job if retry"| twdb
+        oban -->|"maintenance cron"| recovery
+        recovery -->|"pending + job; no attempt"| twdb
+    end
+    subgraph ironhold["Ironhold boundary — implemented"]
+        verify["POST /api/webhooks<br/>HMAC/time before JSON<br/>replay + event idempotency"]
+        ihdb[("PostgreSQL / Ironhold<br/>claim + received event")]
+        verify -->|"atomic claim + event; then 202"| ihdb
+    end
+    publisher -->|"Bearer + JSON"| api
+    transport -->|"signed HTTP POST"| verify
 
-Ironhold remains an independent system and repository. Tidewake must not depend on Ironhold internals.
+    subgraph future["PLANNED — outside the implemented flow"]
+        twfuture["Tidewake planned<br/>human login / UI<br/>Retry-After / retention<br/>exporter / alerts"]
+        ihfuture["Ironhold planned<br/>rate limit / admin UI<br/>key rotation / audit<br/>retention / alerts"]
+    end
+    classDef planned fill:none,stroke-dasharray:5 5;
+    class twfuture,ihfuture planned;
+    style future fill:none,stroke-dasharray:5 5
+```
+
+Solid nodes and arrows describe implemented responsibilities; disconnected dashed boxes are explicitly planned. Enclosing boxes mark trust boundaries, not machines or network segments. The database-to-Oban arrow represents durable job storage, not an HTTP call from PostgreSQL. Development and tests use the deterministic adapter by default; Req requires explicit development activation. Production configuration selects Req, but no production rollout or joint production integration has been demonstrated.
+
+Read the diagram with these contract boundaries:
+
+- **API authentication and ingestion:** [Router](../lib/tidewake_web/router.ex) authenticates the service account and checks `events_write` before [EventController](../lib/tidewake_web/controllers/event_controller.ex). Invalid credentials return `401`; insufficient permission returns `403`. [Webhooks](../lib/tidewake/webhooks.ex) commits ingestion before `201`. The [Event schema](../lib/tidewake/webhooks/event.ex) and database enforce unique `(project_id, external_id)`; duplicate ingestion returns `409` without more jobs. Zero active endpoints is valid; any fan-out insertion failure rolls back the whole ingestion.
+- **Signed delivery:** [DeliveryProcessor](../lib/tidewake/webhooks/delivery_processor.ex) claims only due, expected work and cancels inactive destinations without sending. [Envelope](../lib/tidewake/webhooks/envelope.ex) maps `external_id` to wire `id`; [Signature](../lib/tidewake/webhooks/signature.ex) signs `v1.<event_id>.<timestamp>.<exact_body_bytes>`. [Req](../lib/tidewake/webhooks/delivery_adapters/req.ex) sends that same body with `Tidewake-Id`, `Tidewake-Timestamp` and `Tidewake-Signature`; it does not forward the API credential. HMAC authenticates bytes, not a project identity, and provides no encryption. One shared signing secret is configured, without per-project keys or overlapping-key rotation; TLS termination and secret distribution remain deployment decisions.
+- **Ironhold verification and durable acknowledgement:** the [public receiving contract](https://github.com/Carlos-ccaetano/Ironhold/blob/main/docs/api/webhooks.md) requires single signing headers, JSON media type and at most 262,144 raw bytes. HMAC uses constant-time comparison and an inclusive timestamp window of 300 seconds past through 30 seconds future, before decoding; authenticated header and body IDs must match. First acceptance and an identical stored ID/type/decoded payload with a fresh timestamp/signature return `202`. Exact signature reuse or conflicting event content returns generic `409`; conflicting content rolls back the provisional replay claim. Event-ID uniqueness is receiver-wide, unlike Tidewake's project-scoped external ID, so publishers sharing one Ironhold store must avoid cross-project collisions. Supervised cleanup removes expired replay claims every five minutes by default.
+- **Retry and recovery:** [RetryPolicy](../lib/tidewake/webhooks/retry_policy.ex) treats `2xx` as success, retries only allowlisted transient outcomes and makes other outcomes, including `409`, terminal. [Automatic retry](#intended-flow) commits the failed attempt, pending transition and successor job together, with exponential equal jitter and at most six attempts per cycle. [Stale recovery](../lib/tidewake/workers/recover_stale_deliveries_worker.ex) preserves the unpersisted attempt identity and counters, excludes active equivalent work and creates no attempt. It may resend a received request: delivery is at least once. Signing material is recomputed on every send; concurrent sends of identical bytes within one timestamp second can still produce the same signature and trigger replay rejection.
+- **Other implemented controls:** [admin manual retry and paginated audit](api/manual-retries.md), including current project/admin authority, account admission and actor-scoped idempotency, already exist beside this automatic path. Acceptance atomically commits audit, a new cycle and its job; at most three manual cycles follow cycle 0, preserving lifetime history. Domain Telemetry and declarative metrics are implemented; external reporting and alerts remain planned. Signing secrets, signatures and signing timestamps stay out of attempts, jobs and domain Telemetry; accepted decoded payloads are persisted in each service's own event store.
+
+Follow [Local Tidewake to Ironhold delivery](../README.md#local-tidewake-to-ironhold-delivery) for the existing synthetic walkthrough. Regression evidence includes the [outbound worker pipeline](../test/tidewake/workers/outbound_delivery_pipeline_test.exs), [HTTP ingestion](../test/tidewake_web/controllers/event_controller_test.exs), [project isolation](../test/tidewake_web/controllers/api_isolation_regression_test.exs) and [retry-cycle pipeline](../test/tidewake/workers/retry_cycle_delivery_pipeline_test.exs). These tests do not establish a live cross-repository integration. Detailed component behavior remains below; [the roadmap](roadmap.md) records future work.
 
 ## API authentication boundary
 
