@@ -22,45 +22,34 @@ flowchart TB
     accDescr: A client crosses Tidewake's authenticated API boundary. One PostgreSQL transaction stores the event, deliveries and Oban jobs. Workers sign and send HTTP requests to Ironhold, which verifies the raw bytes and atomically applies replay protection and event idempotency. Tidewake persists outcomes and schedules bounded retries or stale recovery. Dashed boxes identify future work outside the implemented flow.
 
     subgraph client["Client boundary"]
-        publisher["Event publisher<br/>service-account credential"]
+        publisher["Event publisher<br/>service account"]
     end
-
     subgraph tidewake["Tidewake boundary — implemented"]
-        api["POST /api/events<br/>RequireServiceAccount + RequirePermission"]
-        ingest["Webhooks.ingest_event/2<br/>project-scoped external_id uniqueness<br/>active endpoint fan-out"]
-        twdb[("PostgreSQL / Tidewake.Repo<br/>events, endpoints, deliveries, delivery_attempts<br/>identity, retry audit, oban_jobs")]
-        oban["Oban<br/>durable jobs; default and maintenance queues"]
-        processor["DeliverWebhookWorker → DeliveryProcessor<br/>guarded claim; Envelope + Signature<br/>HMAC-SHA256 over exact JSON bytes"]
-        transport["DeliveryAdapters.Req<br/>SSRF checks + DNS pinning<br/>bounded response; no redirects or Req retries"]
-        outcome["RetryPolicy + RetryBackoff<br/>at most 6 attempts/cycle; backoff + jitter<br/>persist outcome; retry or terminal state"]
-        recovery["RecoverStaleDeliveriesWorker<br/>every minute; stale processing ≥ 5 minutes<br/>at most 100 candidates, locked and rechecked"]
-
-        api -->|"authenticated Scope + events_write"| ingest
-        ingest -->|"atomic event + deliveries + initial jobs"| twdb
-        twdb -->|"persisted job storage"| oban
-        oban -->|"default; max_attempts: 1"| processor
-        processor -->|"exact body + three signing headers"| transport
-        transport -->|"HTTP status or normalized transport error"| outcome
-        outcome -->|"atomic attempt + state + optional successor job"| twdb
+        api["POST /api/events<br/>service account + permission<br/>project-scoped idempotency"]
+        twdb[("PostgreSQL / Tidewake<br/>events + deliveries + oban_jobs")]
+        oban["Oban / DeliverWebhookWorker<br/>one logical attempt"]
+        transport["DeliveryProcessor / Req<br/>HMAC-SHA256 + safe HTTP"]
+        outcome["RetryPolicy / RetryBackoff<br/>6 attempts/cycle + jitter"]
+        recovery["Stale recovery worker<br/>≥ 5 min; ≤ 100 per scan"]
+        api -->|"atomic event + deliveries + jobs"| twdb
+        twdb -->|"durable queue"| oban
+        oban -->|"default queue"| transport
+        transport -->|"response / transport error"| outcome
+        outcome -->|"attempt + state + next job if retry"| twdb
         oban -->|"maintenance cron"| recovery
-        recovery -->|"atomic pending + replacement job; no new attempt"| twdb
+        recovery -->|"pending + job; no attempt"| twdb
     end
-
-    subgraph ironhold["Ironhold boundary — implemented, independent receiver"]
-        verify["POST /api/webhooks<br/>media type + body limit<br/>HMAC + timestamp before JSON decoding; matching ID"]
-        receive["Webhooks.ingest_authenticated_webhook/3<br/>replay fingerprint + event-content idempotency"]
-        ihdb[("PostgreSQL / Ironhold.Repo<br/>webhook_replay_claims + received_webhooks<br/>one transaction before 202 Accepted")]
-
-        verify -->|"authenticated, validated envelope"| receive
-        receive -->|"claim + insert or acknowledge identical event"| ihdb
+    subgraph ironhold["Ironhold boundary — implemented"]
+        verify["POST /api/webhooks<br/>HMAC/time before JSON<br/>replay + event idempotency"]
+        ihdb[("PostgreSQL / Ironhold<br/>claim + received event")]
+        verify -->|"atomic claim + event; then 202"| ihdb
     end
-
-    publisher -->|"Bearer credential + JSON across HTTP boundary"| api
-    transport -->|"signed HTTP POST across receiver boundary"| verify
+    publisher -->|"Bearer + JSON"| api
+    transport -->|"signed HTTP POST"| verify
 
     subgraph future["PLANNED — outside the implemented flow"]
-        twfuture["Tidewake: human login / operational UI<br/>receiver Retry-After, retention, exporter / alerts"]
-        ihfuture["Ironhold: ingestion rate limit, admin UI<br/>secret rotation, broader audit / retention, alerts"]
+        twfuture["Tidewake: human auth / UI<br/>Retry-After, retention, ops"]
+        ihfuture["Ironhold: rate limit / admin<br/>key rotation, audit, ops"]
     end
     classDef planned fill:none,stroke-dasharray:5 5;
     class twfuture,ihfuture planned;
