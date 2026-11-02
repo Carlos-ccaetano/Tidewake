@@ -27,8 +27,8 @@ flowchart TB
     subgraph tidewake["Tidewake boundary — implemented"]
         api["POST /api/events<br/>service account + permission<br/>project-scoped idempotency"]
         twdb[("PostgreSQL / Tidewake<br/>events + deliveries + oban_jobs")]
-        oban["Oban / DeliverWebhookWorker<br/>one logical attempt"]
-        transport["DeliveryProcessor / Req<br/>HMAC-SHA256 + safe HTTP"]
+        oban["Oban queues<br/>default / maintenance"]
+        transport["DeliverWebhookWorker<br/>DeliveryProcessor / Req<br/>HMAC-SHA256 + safe HTTP"]
         outcome["RetryPolicy / RetryBackoff<br/>6 attempts/cycle + jitter"]
         recovery["Stale recovery worker<br/>≥ 5 min; ≤ 100 per scan"]
         api -->|"atomic event + deliveries + jobs"| twdb
@@ -48,8 +48,8 @@ flowchart TB
     transport -->|"signed HTTP POST"| verify
 
     subgraph future["PLANNED — outside the implemented flow"]
-        twfuture["Tidewake: human auth / UI<br/>Retry-After, retention, ops"]
-        ihfuture["Ironhold: rate limit / admin<br/>key rotation, audit, ops"]
+        twfuture["Tidewake planned<br/>human login / UI<br/>Retry-After / retention<br/>exporter / alerts"]
+        ihfuture["Ironhold planned<br/>rate limit / admin UI<br/>key rotation / audit<br/>retention / alerts"]
     end
     classDef planned fill:none,stroke-dasharray:5 5;
     class twfuture,ihfuture planned;
