@@ -157,48 +157,7 @@ The event API supports `POST /api/events`, `GET /api/events/:id`, and `GET /api/
 
 ## Local Tidewake to Ironhold delivery
 
-Use the same public, local-only signing value in both applications. Neither project loads `.env` automatically, so export the variables in the shell that starts each server.
-
-In the Ironhold repository, start the receiver on port 4001:
-
-    export IRONHOLD_WEBHOOK_SIGNING_SECRET=dev-only-webhook-signing-secret-not-for-production
-    PORT=4001 mix phx.server
-
-In this repository, explicitly enable outbound HTTP and local targets for development:
-
-    export TIDEWAKE_WEBHOOK_SIGNING_SECRET=dev-only-webhook-signing-secret-not-for-production
-    export TIDEWAKE_ENABLE_OUTBOUND_HTTP=true
-    export TIDEWAKE_ALLOW_LOCAL_WEBHOOK_TARGETS=true
-    mix phx.server
-
-Register Ironhold as an active endpoint:
-
-    curl --fail-with-body -X POST http://localhost:4000/api/endpoints \
-      -H "Authorization: Bearer ${TIDEWAKE_SERVICE_ACCOUNT_TOKEN}" \
-      -H 'content-type: application/json' \
-      -d '{"name":"Local Ironhold","url":"http://127.0.0.1:4001/api/webhooks"}'
-
-Send an event with a unique external ID:
-
-    EVENT_EXTERNAL_ID="evt_local_$(date +%s)"
-    curl --fail-with-body -X POST http://localhost:4000/api/events \
-      -H "Authorization: Bearer ${TIDEWAKE_SERVICE_ACCOUNT_TOKEN}" \
-      -H 'content-type: application/json' \
-      -d "{\"external_id\":\"${EVENT_EXTERNAL_ID}\",\"type\":\"order.created\",\"data\":{\"order_id\":\"local-123\"}}"
-
-Read the internal event `id` from that response and check its delivery:
-
-    curl --fail-with-body \
-      -H "Authorization: Bearer ${TIDEWAKE_SERVICE_ACCOUNT_TOKEN}" \
-      http://localhost:4000/api/events/<event-id>/deliveries
-
-The delivery should reach `succeeded` with `attempt_count` equal to 1. The Ironhold terminal should show `POST /api/webhooks` completing with `202`, confirming that the authenticated webhook reached the receiver.
-
-Stop the database when finished:
-
-    docker compose down
-
-The named Docker volume preserves local database data. Use docker compose down -v only when you intentionally want to delete it.
+Follow the [reproducible local demonstration](docs/demo/README.md) for isolated setup, secure disposable credentials, real signed HTTP delivery, idempotent resend, exact replay rejection, persisted evidence and a short technical interview outline.
 
 ## Environment variables
 
