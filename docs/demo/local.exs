@@ -1,6 +1,6 @@
 # Documentation harness only. Run through run.py; never pass secrets as arguments.
 Mix.Task.run("app.config")
-Logger.configure(level: :emergency)
+Logger.configure(level: :warning)
 
 try do
   [role] = System.argv()
@@ -120,7 +120,20 @@ try do
 
       %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
       [["succeeded", 1]] = query.("SELECT status, attempt_count FROM deliveries")
-      [[202]] = query.("SELECT http_status FROM delivery_attempts")
+      [[http_status]] = query.("SELECT http_status FROM delivery_attempts")
+      true = is_integer(http_status) and http_status in 100..599
+      expected_status = 202
+
+      IO.puts(
+        "DEMO worker_status " <>
+          Jason.encode!(%{observed: http_status, expected: expected_status})
+      )
+
+      if http_status != expected_status do
+        Process.put(:demo_stage, :worker_http_status_mismatch)
+        raise "Unexpected persisted worker HTTP status"
+      end
+
       200 = request.(:get, "/api/events/#{id}/deliveries", []).status
       IO.puts("DEMO worker: real HTTP=202; delivery=succeeded attempts=1; status GET=200")
       event = Webhooks.get_event(project, id)
@@ -154,6 +167,16 @@ try do
         )
 
       401 = send_signed.(invalid)
+
+      401 =
+        Req.post!("http://127.0.0.1:42631/api/webhooks",
+          body:
+            Jason.encode!(%{id: external_id, type: "demo.created", data: %{synthetic: false}}),
+          headers: [{"content-type", "application/json"} | signed],
+          retry: false,
+          redirect: false
+        ).status
+
       iron_config = Keyword.merge(config, database: "ironhold_demo263_#{input["run"]}")
 
       {:ok, conn} =
@@ -170,7 +193,7 @@ try do
       GenServer.stop(conn)
 
       IO.puts(
-        "DEMO receiver: fresh=202 exact_replay=409 expired=401 invalid_HMAC=401; events/claims=1/2"
+        "DEMO receiver: fresh=202 exact_replay=409 expired=401 invalid_HMAC=401 tampered_payload=401; events/claims=1/2"
       )
     after
       {:ok, _} =
@@ -182,6 +205,7 @@ try do
 
   :ok = Application.stop(app)
   IO.puts("DEMO #{role} STOPPED; retained database #{database}")
+  IO.puts("DEMO #{role} COMPLETE")
 rescue
   _ ->
     # Exceptions may embed request headers. Never print raw exception values.

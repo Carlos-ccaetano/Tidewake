@@ -4,7 +4,7 @@ This is a synthetic development rehearsal with two real HTTP servers and two sep
 
 ## Prerequisites
 
-- Tidewake main including PR #275; a separate clean Ironhold checkout. Record both revisions with `git rev-parse HEAD` before presenting.
+- Tidewake main including PR #276; a separate clean Ironhold checkout. Record both revisions with `git rev-parse HEAD` before presenting.
 - Python 3.10+, Git, PostgreSQL 16 on localhost, and Elixir/Mix on PATH. Tidewake pins Elixir 1.19.5 / OTP 28.4; Ironhold pins Elixir 1.18 / OTP 27.3. The evidence below states the actual shared runtime used, rather than claiming both pinned combinations were exercised.
 - A disposable local PostgreSQL role able to create databases. The harness uses each application's local development connection settings. It refuses DATABASE_URL configuration and non-loopback hosts. Never supply production credentials. A local native PostgreSQL or Linux/WSL service is sufficient; Docker Desktop is not required.
 - Free loopback ports **42630** (Tidewake) and **42631** (Ironhold). No external HTTP receiver, paid service or cloud account is required. Dependency installation still needs network access unless cached.
@@ -35,13 +35,13 @@ $env:IRONHOLD_MIX_DEPS_PATH = Join-Path $env:TEMP 'ironhold-demo-deps'
 $env:IRONHOLD_MIX_BUILD_PATH = Join-Path $env:TEMP 'ironhold-demo-build'
 ```
 
-Install locked dependencies using the matching cache for each repository before running the command. These are per-shell overrides, not global settings. Alternatively use clean checkouts in a Linux/WSL home directory, PostgreSQL 16 and the same Python command. Linux is an alternative procedure, not separately proven by the Windows evidence below.
+Install locked dependencies using the matching cache for each repository before running the command. These are per-shell overrides, not global settings. Alternatively use clean checkouts in a Linux/WSL home directory, PostgreSQL 16 and the same Python command. The Windows evidence below and the Linux CI gate described below are distinct validation records.
 
 The [driver](run.py) starts `mix run --no-start docs/demo/local.exs receiver` in Ironhold and the same [documentation harness](local.exs) with role `sender` in Tidewake, using the absolute script path. There is no copied Ironhold code or versioned Ironhold modification. Both services run in `MIX_ENV=dev`, on loopback only. Runtime overrides apply only inside these child processes; source configuration is unchanged.
 
 The driver generates one random disposable signing secret and sends it over stdin pipes to both children. The Tidewake process generates its own random credential pepper and issues a one-hour admin credential through the existing Projects functions. Tokens and signing material remain in memory: no secret is passed as a process argument, written to a file, printed or placed in OS environment variables. Never enable shell tracing, dump environments, inspect process command lines, print raw exception/request objects or use curl verbose/trace output while presenting.
 
-Application output is deliberately withheld; only harness `DEMO` records are displayed. Failures report a bounded stage instead of exceptions that might contain headers. Compile warnings must be checked separately with the repository quality commands; this filtered transcript does not establish a warning-free build.
+Application output is redacted; harness `DEMO` records and sanitized warning notifications are displayed. Failures report a bounded stage instead of exceptions that might contain headers. Warnings are counted without printing potentially sensitive text. CI compiles both projects with `--warnings-as-errors` before starting the harness; the filtered transcript alone does not establish a warning-free build.
 
 ## What the command verifies
 
@@ -58,7 +58,7 @@ Each run uses a random suffix and creates `tidewake_demo263_<suffix>` and `ironh
 | Acknowledge | Tidewake records HTTP `202`, one attempt and `succeeded`; authenticated delivery-status GET returns `200`. Ironhold's accepted response follows HMAC/timestamp/ID verification and its database transaction. |
 | Legitimate resend | Encode the same immutable event with Envelope, sign with Signature and POST the exact bytes directly to Ironhold: `202`. The explicit timestamp is current time +10 seconds, within the documented +30-second window, to guarantee distinct signing material without sleeping. This is a contract exercise, not the production worker's clock policy. |
 | Exact replay | Send that same body and signing headers again: `409`. |
-| Negative verification | A correctly signed expired timestamp returns `401`; an invalid HMAC returns `401`. |
+| Negative verification | A correctly signed expired timestamp, an invalid HMAC and a payload altered after signing each return `401`. |
 | Persisted result | SQL against Ironhold confirms **one received event and two replay claims**, with no extra claims for rejected requests. |
 | Retirement | Revoke the disposable Tidewake credential in an `after` block, then stop both applications. |
 
@@ -89,9 +89,36 @@ DEMO PASS: isolated rehearsal; databases retained; no secrets printed
 
 Each line after readiness is emitted only after the corresponding assertions pass. The helper is an assert-based self-check, not a simulated output generator. The observed first receiver `202` is persisted in Tidewake's attempt, and the final receiver counts are queried directly from PostgreSQL. No screenshot/video, automatic transient-failure retry, stale recovery, manual retry execution, concurrent load, TLS or production behavior is claimed. The queues are drained explicitly to make the pre-execution persistence inspection reproducible. Existing unit/integration tests remain complementary evidence, not a substitute for this real run.
 
+## Continuous integration
+
+The separate `ironhold-integration` job in [CI](../../.github/workflows/ci.yml) runs on Linux with its own PostgreSQL 16 service container. It checks out Ironhold at **`4c97c8e91f3a04a57e6cd5c6ebd7686c03f08363`**, with Git credentials not persisted, and verifies HEAD matches that complete SHA. Each project installs its own locked dependencies. No production environment or personal credential is used.
+
+The integration intentionally uses one shared **Elixir 1.19.5 / OTP 28.4** runtime. Tidewake requires `~> 1.19`; Ironhold declares `~> 1.18` (which admits 1.19), but its `.tool-versions` pins Elixir 1.18 / OTP 27.3. Compatibility is checked by compiling Ironhold without warnings, running its complete test suite on the shared runtime and executing the real HTTP contract. This job does **not** certify every permitted Elixir version or replace Ironhold's own OTP 27 CI. Runtime and dependency upgrades require rerunning these gates.
+
+After precompilation, CI runs:
+
+```sh
+python3 -O docs/demo/test_run.py RunnerTests
+python3 -O docs/demo/run.py .integration/ironhold
+IRONHOLD_CHECKOUT=.integration/ironhold python3 -O docs/demo/test_run.py ContractFailureTest
+```
+
+To reproduce, substitute your prepared Ironhold checkout path. `-O` deliberately disables Python assertions; critical path, runtime and completion checks use explicit failures and remain effective. Elixir pattern-match checks verify the HTTP and database contract.
+
+The runner requires zero exit codes from **both** processes, their final completion records (after checks and application shutdown), and released listeners before printing PASS. Readiness uses a monotonic deadline, not a timeout renewed by each log line. Graceful shutdown has bounded waits; Linux escalates from SIGTERM to SIGKILL for the owned process group, including leftover descendants. The Python entry point also unwinds cleanup on interruption. The CI service container is discarded by GitHub Actions on success, failure or job termination; local runs retain their synthetic databases.
+
+Runner tests use real lightweight subprocesses to cover successful shutdown, zero exit without completed checks, a success record followed by nonzero exit, receiver failure/early exit, readiness timeout, sender timeout and (on Linux) a child ignoring SIGTERM. Windows uses bounded taskkill of the owned tree and reports failure if tree cleanup cannot be verified; it never reports PASS after such an error.
+
+The negative control runs the **real** worker and receiver using a temporary copy of `local.exs` whose expected persisted HTTP status is deliberately changed from 202 to 201. Immediately before comparison, the harness emits `DEMO worker_status` with a JSON object containing only the observed persisted HTTP status and expected status. Only a mismatch sets the exclusive `worker_http_status_mismatch` error stage. The control requires exactly one observation of 202 against expected 201 and that specific failure stage; exit 1 alone is insufficient.
+
+Two additional real-service regressions inject a failure before the status observation and an actual Oban worker error caused by removing the disposable sender's signing configuration. Both must be rejected as invalid negative controls. Every failure case must revoke the credential, complete receiver shutdown, omit PASS and release both listeners; the generated signing secret is checked for absence from the displayed transcript. Changes stay in temporary harness copies and process-local test configuration; neither service source is changed. The same checks run with Python `-O`.
+
+To update Ironhold, review its public contract, lockfile and runtime changes, then change the single full `IRONHOLD_REVISION` SHA in the workflow and this documented revision in a reviewed PR. Require the receiver suite, positive integration, negative control and runner lifecycle tests to pass. Do not track a moving branch or silently update the pin.
+
+The existing quality job is unchanged. This integration covers the synthetic single-event contract, including post-signing payload tampering, with actual loopback HTTP and PostgreSQL. Automatic transient retry schedules, stale recovery, admin manual retry, TLS, load, multi-node operation and deployment remain outside this gate.
 ## Troubleshooting
 
-- **Launcher or missing dependency:** check `mix --version`, Python and locked dependency installation in each checkout. Use temporary caches or Linux/WSL when OneDrive denies writes. The driver waits at most five minutes for startup/execution; cold builds may require precompilation. Do not fix this with sleeps.
+- **Launcher or missing dependency:** check `mix --version`, Python and locked dependency installation in each checkout. Use temporary caches or Linux/WSL when OneDrive denies writes. The driver applies a five-minute deadline to readiness and sender execution (overridable with `--timeout`); cold builds may require precompilation. Do not fix this with sleeps.
 - **Database stage:** ensure localhost PostgreSQL is accepting connections and the disposable role can create databases. Refused host/URL, an existing run database or failed migrations are blockers, not permission to reuse production settings.
 - **Service start:** check only the named local ports for occupancy. Stop the process you own, or use another isolated environment. Never enumerate all process arguments or environments.
 - **HTTP stage:** check the existing development flags, clock synchronization and the public contract. `409` is terminal for Tidewake and is not a request to retry automatically. Do not disable signature verification or replay claims.
