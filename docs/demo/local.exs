@@ -120,7 +120,20 @@ try do
 
       %{success: 1, failure: 0} = Oban.drain_queue(queue: :default)
       [["succeeded", 1]] = query.("SELECT status, attempt_count FROM deliveries")
-      [[202]] = query.("SELECT http_status FROM delivery_attempts")
+      [[http_status]] = query.("SELECT http_status FROM delivery_attempts")
+      true = is_integer(http_status) and http_status in 100..599
+      expected_status = 202
+
+      IO.puts(
+        "DEMO worker_status " <>
+          Jason.encode!(%{observed: http_status, expected: expected_status})
+      )
+
+      if http_status != expected_status do
+        Process.put(:demo_stage, :worker_http_status_mismatch)
+        raise "Unexpected persisted worker HTTP status"
+      end
+
       200 = request.(:get, "/api/events/#{id}/deliveries", []).status
       IO.puts("DEMO worker: real HTTP=202; delivery=succeeded attempts=1; status GET=200")
       event = Webhooks.get_event(project, id)

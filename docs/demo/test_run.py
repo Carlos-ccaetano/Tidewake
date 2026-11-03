@@ -1,6 +1,7 @@
 """Runner lifecycle checks use real child processes, never live service secrets."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -84,30 +85,96 @@ class RunnerTests(unittest.TestCase):
                 run.main([str(run.ROOT), "--timeout", "inf"])
         self.assertEqual(failure.exception.code, 2)
 
+    def test_child_output_redacts_credentials_payloads_and_warnings(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            run.display("Authorization: Bearer synthetic-token")
+            run.display("Tidewake-Signature: v1=synthetic-signature")
+            run.display('{"payload": "synthetic-private-data"}')
+            run.display("warning: request contained synthetic-secret")
+        self.assertEqual(output.getvalue(), "DEMO diagnostic: child warning observed (details redacted)\n")
+
 
 @unittest.skipUnless(os.environ.get("IRONHOLD_CHECKOUT"), "Requires prepared real services and PostgreSQL")
 class ContractFailureTest(unittest.TestCase):
-    def test_real_http_contract_mismatch_returns_failure(self):
+    def run_failure(self, extra_replacement=None):
         original = run.SCRIPT.read_text(encoding="utf-8")
-        expected = '[[202]] = query.("SELECT http_status FROM delivery_attempts")'
+        expected = 'expected_status = 202'
         self.assertEqual(original.count(expected), 1)
+        modified = original.replace(expected, 'expected_status = 201')
+        if extra_replacement:
+            before, after = extra_replacement
+            self.assertEqual(modified.count(before), 1)
+            modified = modified.replace(before, after)
+        secret = run.secrets.token_hex(32)
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "local.exs"
-            script.write_text(original.replace(expected, expected.replace("202", "201")), encoding="utf-8")
+            script.write_text(modified, encoding="utf-8")
             output = io.StringIO()
-            with patch.object(run, "SCRIPT", script), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with patch.object(run, "SCRIPT", script), patch.object(run.secrets, "token_hex", return_value=secret), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 code = run.main([os.environ["IRONHOLD_CHECKOUT"]])
+            transcript = output.getvalue()
             self.assertEqual(code, 1)
-            self.assertIn("DEMO ingestion:", output.getvalue())
-            self.assertIn("DEMO FAILED stage=provision_and_http", output.getvalue())
-            self.assertIn("DEMO credential revoked", output.getvalue())
-            self.assertIn("DEMO receiver COMPLETE", output.getvalue())
-            self.assertNotIn("DEMO PASS", output.getvalue())
-            for line in output.getvalue().splitlines():
+            self.assertIn("DEMO ingestion:", transcript)
+            self.assertIn("DEMO credential revoked", transcript)
+            self.assertIn("DEMO receiver COMPLETE", transcript)
+            self.assertNotIn("DEMO PASS", transcript)
+            self.assertFalse(secret in transcript, "Signing secret appeared in child output")
+            for line in transcript.splitlines():
                 if line.startswith("DEMO diagnostic:"):
                     print(line)
         run.closed_ports()
-        print("DEMO negative control: actual worker returned 202; incompatible expectation rejected with exit 1; listeners closed")
+        return transcript
+
+    def assert_status_mismatch(self, transcript):
+        lines = transcript.splitlines()
+        prefix = "DEMO worker_status "
+        observations = [json.loads(line[len(prefix):]) for line in lines if line.startswith(prefix)]
+        self.assertTrue(observations == [{"observed": 202, "expected": 201}], "Missing unique persisted HTTP 202 observation against expected 201")
+        failures = [line.split(" (", 1)[0] for line in lines if line.startswith("DEMO FAILED ")]
+        self.assertEqual(failures, ["DEMO FAILED stage=worker_http_status_mismatch"])
+
+    def test_real_http_contract_mismatch_returns_failure(self):
+        transcript = self.run_failure()
+        self.assert_status_mismatch(transcript)
+        for line in transcript.splitlines():
+            if line.startswith(("DEMO worker_status ", "DEMO FAILED stage=worker_http_status_mismatch ")):
+                print(line)
+        print("DEMO negative control: observed=202 expected=201; worker_http_status_mismatch detected; exit=1; listeners closed")
+
+    def test_observation_requires_specific_mismatch_cause(self):
+        observation = 'DEMO worker_status {"observed":202,"expected":201}\n'
+        mismatch = "DEMO FAILED stage=worker_http_status_mismatch (details suppressed)"
+        for transcript in (
+            observation + "DEMO FAILED stage=provision_and_http (details suppressed)",
+            observation.replace('202', '500') + mismatch,
+            observation * 2 + mismatch,
+        ):
+            with self.subTest(transcript=transcript), self.assertRaises(AssertionError):
+                self.assert_status_mismatch(transcript)
+
+    def test_failure_before_status_check_is_not_valid_negative_control(self):
+        query = '[[http_status]] = query.("SELECT http_status FROM delivery_attempts")'
+        transcript = self.run_failure((query, 'raise "Injected failure before status observation"\n      ' + query))
+        self.assertIn("DEMO FAILED stage=provision_and_http ", transcript)
+        self.assertNotIn("DEMO worker_status ", transcript)
+        with self.assertRaises(AssertionError):
+            self.assert_status_mismatch(transcript)
+        print("DEMO negative control: pre-status failure rejected; exit=1; listeners closed")
+
+    def test_worker_error_is_not_valid_negative_control(self):
+        drain = '%{success: 1, failure: 0} = Oban.drain_queue(queue: :default)'
+        failure = '''Application.delete_env(:tidewake, :webhook_signing_secret)
+      %{success: 0, discard: 1} = Oban.drain_queue(queue: :default)
+      IO.puts("DEMO injected_worker_failure: success=0 discard=1")
+      raise "Injected worker failure"'''
+        transcript = self.run_failure((drain, failure))
+        self.assertIn("DEMO injected_worker_failure: success=0 discard=1", transcript)
+        self.assertIn("DEMO FAILED stage=provision_and_http ", transcript)
+        self.assertNotIn("DEMO worker_status ", transcript)
+        with self.assertRaises(AssertionError):
+            self.assert_status_mismatch(transcript)
+        print("DEMO negative control: actual worker error rejected; exit=1; listeners closed")
 
 
 if __name__ == "__main__":
