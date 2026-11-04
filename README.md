@@ -12,6 +12,45 @@ Webhook delivery must handle temporary endpoint failures without losing accepted
 
 [Documentation](#documentation) · [Delivery design and evidence](#delivery-design-and-evidence) · [Local setup](#local-setup) · [Quality checks](#quality-checks) · [Ironhold](https://github.com/Carlos-ccaetano/Ironhold)
 
+## Architecture Overview
+
+```mermaid
+flowchart TB
+    accTitle: Tidewake durable delivery and the independent Ironhold receiver
+    accDescr: A producer authenticates within one project. Ingestion stores an event, deliveries and Oban jobs in one PostgreSQL transaction. Oban runs a worker and delivery processor, which commits its claim before signing and sending HTTP. Outcomes and eligible retries are persisted; maintenance recovers stale work. Ironhold receives into its own database. Delivery is at least once.
+
+    producer["API client / producer"]
+    subgraph tidewake["Tidewake — delivery"]
+        api["API boundary<br/>Project auth + permissions"]
+        ingest["Webhooks context<br/>Ingestion + fan-out"]
+        twdb[("PostgreSQL / Tidewake<br/>Event + Delivery<br/>Oban Job")]
+        worker["Oban worker<br/>DeliveryProcessor"]
+        http["Safe HTTP / Req<br/>Target checks<br/>Response limit"]
+        recovery["Stale recovery<br/>Oban cron"]
+
+        api -->|"trusted project"| ingest
+        ingest -->|"one transaction"| twdb
+        twdb -->|"Oban: due job"| worker
+        worker -->|"claim committed<br/>HMAC-SHA256"| http
+        http -->|"outcome"| worker
+        worker -->|"outcome + retry job<br/>bounded backoff"| twdb
+        recovery -->|"reschedule"| twdb
+    end
+    subgraph ironhold["Ironhold — independent receiver"]
+        receive["Authenticate + receive webhook"]
+        ihdb[("PostgreSQL / Ironhold<br/>Replay claim<br/>Received webhook")]
+        receive -->|"one transaction"| ihdb
+    end
+    producer -->|"Bearer + POST /api/events"| api
+    http -->|"Signed HTTP POST<br/>at-least-once"| receive
+```
+
+Tidewake owns durable delivery. Project-bound authentication and permissions precede ingestion, which commits the event, one delivery per active project endpoint, and its Oban job together before returning `201 Created`. Oban executes the stored jobs asynchronously. The processor commits its claim before signing and sending HTTP; no database transaction stays open during the request. It then persists the outcome and, for eligible transient failures, a successor job with backoff and jitter (six attempts per cycle). Recovery reschedules abandoned processing work without inventing an attempt.
+
+Delivery is **at least once**: a received request can be sent again when its outcome was not persisted. [Ironhold](https://github.com/Carlos-ccaetano/Ironhold) owns authentication, replay checks, and event idempotency on receipt, using a separate PostgreSQL database. This shows the implemented HTTP path; development uses a deterministic adapter unless HTTP is explicitly enabled.
+
+[Detailed architecture and trust boundaries](docs/architecture.md#tidewakeironhold-delivery-and-trust-boundaries) · [Event HTTP contract](docs/api/events.md) · [Real local Tidewake → Ironhold demonstration](docs/demo/README.md)
+
 ## Current status
 
 ### Implemented and tested
