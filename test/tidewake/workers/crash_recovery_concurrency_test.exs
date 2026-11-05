@@ -162,6 +162,9 @@ defmodule Tidewake.Workers.CrashRecoveryConcurrencyTest do
       Application.put_env(:tidewake, __MODULE__, {self(), :normal})
 
       unboxed(fn ->
+        expected_status = if phase == :before_claim, do: "pending", else: "processing"
+        assert Repo.get!(Delivery, delivery.id).status == expected_status
+
         assert Repo.aggregate(from(a in Attempt, where: a.delivery_id == ^delivery.id), :count) ==
                  0
 
@@ -350,6 +353,7 @@ defmodule Tidewake.Workers.CrashRecoveryConcurrencyTest do
     {parent, phase} = Application.fetch_env!(:tidewake, __MODULE__)
     barrier(parent, phase, :before_http)
     result = ReqAdapter.deliver(url, body, headers)
+    if phase == :after_response, do: assert({:ok, %{status: 202}} = result)
     barrier(parent, phase, :after_response)
     result
   end
