@@ -7,6 +7,9 @@ defmodule Tidewake.Application do
 
   @impl true
   def start(_type, _args) do
+    # LiveView logs sessions independently of Phoenix.Logger. Keep that logger silent.
+    :ok = Logger.put_module_level(Phoenix.LiveView.Logger, :none)
+
     children = [
       TidewakeWeb.Telemetry,
       Tidewake.Repo,
@@ -24,6 +27,9 @@ defmodule Tidewake.Application do
     opts = [strategy: :one_for_one, name: Tidewake.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  @impl true
+  def stop(_state), do: TidewakeWeb.MetricEvents.detach()
 
   # Tell Phoenix to update the endpoint configuration
   # whenever the application is updated.

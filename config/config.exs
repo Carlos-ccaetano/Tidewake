@@ -63,9 +63,12 @@ config :tailwind,
 # Configure Elixir's Logger
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: []
 
-# Use Jason for JSON parsing in Phoenix
+# Generic request/SQL loggers can format bodies, parameter keys and exceptions.
+# MetricEvents retains timings without forwarding their raw metadata.
+config :phoenix, :logger, false
+config :tidewake, Tidewake.Repo, log: false
 config :phoenix, :json_library, Jason
 
 # Import environment specific config. This must remain at the bottom

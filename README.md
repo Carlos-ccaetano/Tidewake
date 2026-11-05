@@ -66,6 +66,8 @@ Delivery is **at least once**: a received request can be sent again when its out
 
 Operational UI and human authentication, receiver `Retry-After` handling, retention/disposal policy, an external metrics reporter, alerts, and automated secret rotation remain future work. Production deployment and operational validation are not established by local tests or CI.
 
+[Telemetry privacy](docs/telemetry-privacy.md) defines the allowlisted metric boundary, internal library metadata, logging tradeoffs and remaining reporter/alert work.
+
 ## Documentation
 
 - **Design:** [Architecture](docs/architecture.md) · [Tidewake–Ironhold diagram and trust boundaries](docs/architecture.md#tidewakeironhold-delivery-and-trust-boundaries) · [Roadmap](docs/roadmap.md)
