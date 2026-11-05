@@ -3,7 +3,7 @@ defmodule Tidewake.Webhooks do
   Manages webhook events, destination endpoints, and their persistence.
   """
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, subquery: 1]
 
   alias Ecto.{Changeset, Multi}
   alias Tidewake.Projects.{Authorization, Project, Scope}
@@ -15,7 +15,8 @@ defmodule Tidewake.Webhooks do
     ManualRetryIdempotency,
     ManualRetryJobs,
     ManualRetryPolicy,
-    ManualRetryRequest
+    ManualRetryRequest,
+    RetryPolicy
   }
 
   alias Tidewake.Workers.DeliverWebhookWorker
@@ -388,6 +389,7 @@ defmodule Tidewake.Webhooks do
              status: "pending",
              retry_cycle: delivery.retry_cycle + 1,
              cycle_attempt_count: 0,
+             recovery_count: 0,
              completed_at: nil,
              next_attempt_at: nil
            })
@@ -432,6 +434,65 @@ defmodule Tidewake.Webhooks do
   end
 
   def list_stale_delivery_ids(_stale_before, _limit), do: {:error, :invalid_arguments}
+
+  @doc "Reconciles a locked, fair batch without waiting behind active delivery work."
+  def recover_stale_deliveries(%DateTime{} = stale_before, limit)
+      when is_integer(limit) and limit > 0 and limit <= @max_stale_delivery_batch_size do
+    Repo.transaction(fn ->
+      candidates =
+        from(delivery in Delivery,
+          as: :delivery,
+          where: delivery.status in ["pending", "processing"],
+          where: delivery.updated_at <= ^stale_before,
+          where: not exists(subquery(active_delivery_jobs())),
+          order_by: [asc: delivery.updated_at, asc: delivery.id],
+          limit: ^limit,
+          lock: "FOR UPDATE SKIP LOCKED"
+        )
+        |> Repo.all()
+
+      recover_candidates(candidates)
+    end)
+  end
+
+  defp recover_candidates(candidates) do
+    Enum.reduce(candidates, %{recovered_count: 0, exhausted_count: 0}, fn delivery, counts ->
+      %{job: job} = recover_processing_delivery(delivery)
+      key = if job, do: :recovered_count, else: :exhausted_count
+      Map.update!(counts, key, &(&1 + 1))
+    end)
+  end
+
+  defp active_delivery_jobs do
+    states = Oban.Job.unique_states(:incomplete) |> Enum.map(&Atom.to_string/1)
+    worker = Oban.Worker.to_string(DeliverWebhookWorker)
+
+    from(job in Oban.Job,
+      where: job.worker == ^worker and job.state in ^states,
+      where:
+        fragment(
+          "? @> jsonb_build_object('delivery_id', ?, 'attempt_number', ?, 'retry_cycle', ?, 'cycle_attempt_number', ?) AND (? = 0 OR ? @> jsonb_build_object('recovery_count', ?))",
+          job.args,
+          parent_as(:delivery).id,
+          parent_as(:delivery).attempt_count + 1,
+          parent_as(:delivery).retry_cycle,
+          parent_as(:delivery).cycle_attempt_count + 1,
+          parent_as(:delivery).recovery_count,
+          job.args,
+          parent_as(:delivery).recovery_count
+        ) or
+          (parent_as(:delivery).retry_cycle == 0 and parent_as(:delivery).recovery_count == 0 and
+             (job.args ==
+                fragment(
+                  "jsonb_build_object('delivery_id', ?, 'attempt_number', ?)",
+                  parent_as(:delivery).id,
+                  parent_as(:delivery).attempt_count + 1
+                ) or
+                (parent_as(:delivery).attempt_count == 0 and
+                   job.args ==
+                     fragment("jsonb_build_object('delivery_id', ?)", parent_as(:delivery).id))))
+    )
+  end
 
   def list_deliveries_for_event(project, %Event{} = event) do
     project_id = project_id!(project)
@@ -528,7 +589,7 @@ defmodule Tidewake.Webhooks do
         nil ->
           Repo.rollback(:not_found)
 
-        %Delivery{status: "processing"} = delivery ->
+        %Delivery{status: status} = delivery when status in ["pending", "processing"] ->
           recover_if_stale(delivery, stale_before)
 
         %Delivery{} ->
@@ -539,7 +600,9 @@ defmodule Tidewake.Webhooks do
 
   def recover_stale_delivery(_delivery_id, _stale_before), do: {:error, :invalid_arguments}
 
-  def finalize_delivery(delivery_id, attempt_attrs) do
+  def finalize_delivery(delivery_or_claim, attempt_attrs) do
+    {delivery_id, claim} = delivery_identity(delivery_or_claim)
+
     Repo.transaction(fn ->
       query = from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
 
@@ -548,6 +611,7 @@ defmodule Tidewake.Webhooks do
           Repo.rollback(:not_found)
 
         %Delivery{status: "processing"} = delivery ->
+          validate_processing_claim!(delivery, claim)
           finalize_processing_delivery(delivery, attempt_attrs)
 
         %Delivery{} ->
@@ -557,11 +621,15 @@ defmodule Tidewake.Webhooks do
   end
 
   def schedule_delivery_retry(
-        delivery_id,
+        delivery_or_claim,
         attempt_attrs,
         %DateTime{utc_offset: 0, std_offset: 0} = retry_at
       )
-      when is_integer(delivery_id) and delivery_id > 0 and is_map(attempt_attrs) do
+      when ((is_integer(delivery_or_claim) and delivery_or_claim > 0) or
+              is_struct(delivery_or_claim, Delivery)) and
+             is_map(attempt_attrs) do
+    {delivery_id, claim} = delivery_identity(delivery_or_claim)
+
     Repo.transaction(fn ->
       query = from(delivery in Delivery, where: delivery.id == ^delivery_id, lock: "FOR UPDATE")
 
@@ -570,6 +638,7 @@ defmodule Tidewake.Webhooks do
           Repo.rollback(:not_found)
 
         %Delivery{status: "processing"} = delivery ->
+          validate_processing_claim!(delivery, claim)
           schedule_processing_delivery_retry(delivery, attempt_attrs, retry_at)
 
         %Delivery{} ->
@@ -580,6 +649,17 @@ defmodule Tidewake.Webhooks do
 
   def schedule_delivery_retry(_delivery_id, _attempt_attrs, _retry_at),
     do: {:error, :invalid_arguments}
+
+  defp delivery_identity(%Delivery{} = claim), do: {claim.id, claim}
+  defp delivery_identity(id), do: {id, nil}
+
+  defp validate_processing_claim!(_delivery, nil), do: :ok
+
+  defp validate_processing_claim!(delivery, claim) do
+    if Map.take(delivery, [:attempt_count, :retry_cycle, :cycle_attempt_count, :recovery_count]) !=
+         Map.take(claim, [:attempt_count, :retry_cycle, :cycle_attempt_count, :recovery_count]),
+       do: Repo.rollback(:stale_attempt)
+  end
 
   def create_attempt(%Delivery{} = delivery, attrs) do
     %Attempt{
@@ -741,7 +821,8 @@ defmodule Tidewake.Webhooks do
       delivery.id,
       delivery.attempt_count + 1,
       delivery.retry_cycle,
-      delivery.cycle_attempt_count + 1
+      delivery.cycle_attempt_count + 1,
+      delivery.recovery_count
     )
   end
 
@@ -751,6 +832,7 @@ defmodule Tidewake.Webhooks do
       delivery.attempt_count + 1,
       delivery.retry_cycle,
       delivery.cycle_attempt_count + 1,
+      delivery.recovery_count,
       retry_at
     )
   end
@@ -784,16 +866,46 @@ defmodule Tidewake.Webhooks do
   end
 
   defp recover_processing_delivery(delivery) do
-    with :ok <- ensure_no_active_legacy_job(delivery.id, delivery.attempt_count + 1),
-         {:ok, recovered} <-
+    active? =
+      from(candidate in Delivery,
+        as: :delivery,
+        where: candidate.id == ^delivery.id,
+        select: exists(subquery(active_delivery_jobs()))
+      )
+      |> Repo.one!()
+
+    if active?, do: Repo.rollback(:active_job)
+
+    if delivery.recovery_count >= Delivery.max_recoveries() or
+         delivery.cycle_attempt_count >= RetryPolicy.max_attempts() do
+      failed =
+        delivery
+        |> Delivery.changeset(%{
+          status: "failed",
+          completed_at: DateTime.utc_now(),
+          next_attempt_at: nil
+        })
+        |> Repo.update!()
+
+      %{delivery: failed, job: nil}
+    else
+      replace_delivery_job(delivery)
+    end
+  end
+
+  defp replace_delivery_job(delivery) do
+    next_at = if delivery.status == "pending", do: delivery.next_attempt_at
+
+    with {:ok, recovered} <-
            delivery
            |> Delivery.changeset(%{
              status: "pending",
+             recovery_count: delivery.recovery_count + 1,
              completed_at: nil,
-             next_attempt_at: nil
+             next_attempt_at: next_at
            })
            |> Repo.update(),
-         {:ok, job} <- recovered |> new_delivery_job() |> Oban.insert() do
+         {:ok, job} <- recovery_job(recovered) |> Oban.insert() do
       if job.conflict? do
         Repo.rollback(:active_job)
       else
@@ -803,6 +915,11 @@ defmodule Tidewake.Webhooks do
       {:error, reason} -> Repo.rollback(reason)
     end
   end
+
+  defp recovery_job(%Delivery{next_attempt_at: nil} = delivery), do: new_delivery_job(delivery)
+
+  defp recovery_job(delivery),
+    do: new_scheduled_delivery_job(delivery, delivery.next_attempt_at)
 
   defp finalize_processing_delivery(delivery, attrs) do
     attempt_changeset =
@@ -916,10 +1033,14 @@ defmodule Tidewake.Webhooks do
            cycle_attempt_number: cycle_attempt_number
          } = identity
        )
-       when map_size(identity) == 3 and is_integer(attempt_number) and attempt_number > 0 and
+       when map_size(identity) in [3, 4] and is_integer(attempt_number) and attempt_number > 0 and
               is_integer(retry_cycle) and retry_cycle >= 0 and is_integer(cycle_attempt_number) and
               cycle_attempt_number > 0,
-       do: true
+       do:
+         Map.keys(identity) --
+           [:attempt_number, :retry_cycle, :cycle_attempt_number, :recovery_count] == [] and
+           is_integer(Map.get(identity, :recovery_count, 0)) and
+           Map.get(identity, :recovery_count, 0) in 0..6
 
   defp valid_claim_identity?(_identity), do: false
 
@@ -931,10 +1052,11 @@ defmodule Tidewake.Webhooks do
            attempt_number: attempt_number,
            retry_cycle: retry_cycle,
            cycle_attempt_number: cycle_attempt_number
-         }
+         } = identity
        ) do
     if attempt_number == delivery.attempt_count + 1 and retry_cycle == delivery.retry_cycle and
-         cycle_attempt_number == delivery.cycle_attempt_count + 1,
+         cycle_attempt_number == delivery.cycle_attempt_count + 1 and
+         Map.get(identity, :recovery_count, 0) == delivery.recovery_count,
        do: :ok,
        else: {:error, :stale_attempt}
   end

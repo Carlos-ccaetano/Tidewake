@@ -6,11 +6,13 @@ defmodule Tidewake.Webhooks.Delivery do
   alias Tidewake.Webhooks.{Endpoint, Event, ManualRetryPolicy, RetryPolicy}
 
   @statuses ~w(pending processing succeeded failed cancelled)
+  @max_recoveries 6
   @fields [
     :status,
     :attempt_count,
     :retry_cycle,
     :cycle_attempt_count,
+    :recovery_count,
     :next_attempt_at,
     :completed_at
   ]
@@ -24,11 +26,14 @@ defmodule Tidewake.Webhooks.Delivery do
     field :attempt_count, :integer, default: 0
     field :retry_cycle, :integer, default: 0
     field :cycle_attempt_count, :integer, default: 0
+    field :recovery_count, :integer, default: 0
     field :next_attempt_at, :utc_datetime_usec
     field :completed_at, :utc_datetime_usec
 
     timestamps(type: :utc_datetime_usec)
   end
+
+  def max_recoveries, do: @max_recoveries
 
   def changeset(delivery, attrs) do
     delivery
@@ -54,6 +59,11 @@ defmodule Tidewake.Webhooks.Delivery do
     )
     |> check_constraint(:retry_cycle, name: :deliveries_retry_cycle_in_range)
     |> check_constraint(:cycle_attempt_count, name: :deliveries_cycle_attempt_count_in_range)
+    |> validate_number(:recovery_count,
+      greater_than_or_equal_to: 0,
+      less_than_or_equal_to: @max_recoveries
+    )
+    |> check_constraint(:recovery_count, name: :deliveries_recovery_count_in_range)
     |> unique_constraint([:event_id, :endpoint_id])
     |> foreign_key_constraint(:project_id, name: :deliveries_project_id_fkey)
     |> foreign_key_constraint(:event_id, name: :deliveries_event_id_fkey)

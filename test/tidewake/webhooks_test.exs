@@ -817,7 +817,8 @@ defmodule Tidewake.WebhooksTest do
                  "delivery_id" => processing.id,
                  "attempt_number" => 4,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 4
+                 "cycle_attempt_number" => 4,
+                 "recovery_count" => 1
                }
 
         assert job.worker == "Tidewake.Workers.DeliverWebhookWorker"
@@ -828,7 +829,8 @@ defmodule Tidewake.WebhooksTest do
                  "delivery_id" => processing.id,
                  "attempt_number" => 4,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 4
+                 "cycle_attempt_number" => 4,
+                 "recovery_count" => 1
                }
 
         assert Repo.aggregate(Oban.Job, :count) == 1
@@ -852,7 +854,8 @@ defmodule Tidewake.WebhooksTest do
                  "delivery_id" => processing.id,
                  "attempt_number" => 1,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 1
+                 "cycle_attempt_number" => 1,
+                 "recovery_count" => 1
                }
       end)
     end
@@ -881,7 +884,8 @@ defmodule Tidewake.WebhooksTest do
                  "delivery_id" => processing.id,
                  "attempt_number" => 7,
                  "retry_cycle" => 1,
-                 "cycle_attempt_number" => 1
+                 "cycle_attempt_number" => 1,
+                 "recovery_count" => 1
                }
       end)
     end
@@ -900,7 +904,23 @@ defmodule Tidewake.WebhooksTest do
       assert Repo.aggregate(Oban.Job, :count) == 0
     end
 
-    for status <- ~w(pending succeeded failed cancelled) do
+    test "reconciles stale pending work without an active equivalent job" do
+      Oban.Testing.with_testing_mode(:manual, fn ->
+        pending =
+          put_delivery_state(delivery_fixture(), "pending", ~U[2026-09-28 11:55:00.000000Z])
+
+        assert {:ok, %{delivery: recovered, job: job}} =
+                 Webhooks.recover_stale_delivery(pending.id, ~U[2026-09-28 12:00:00.000000Z])
+
+        assert recovered.status == "pending"
+        assert recovered.attempt_count == pending.attempt_count
+        assert recovered.recovery_count == 1
+        assert job.args["recovery_count"] == 1
+        assert Webhooks.list_attempts(recovered) == []
+      end)
+    end
+
+    for status <- ~w(succeeded failed cancelled) do
       test "rejects a delivery in #{status}" do
         status = unquote(status)
         delivery = delivery_fixture()
@@ -1023,7 +1043,8 @@ defmodule Tidewake.WebhooksTest do
                  "delivery_id" => processing.id,
                  "attempt_number" => 1,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 1
+                 "cycle_attempt_number" => 1,
+                 "recovery_count" => 1
                }
 
         assert Repo.aggregate(Oban.Job, :count) == 2
@@ -1042,7 +1063,7 @@ defmodule Tidewake.WebhooksTest do
         assert {:ok, %{delivery: recovered, job: job}} =
                  Webhooks.recover_stale_delivery(processing.id, stale_before)
 
-        assert {:error, :invalid_transition} =
+        assert {:error, :not_stale} =
                  Webhooks.recover_stale_delivery(processing.id, stale_before)
 
         assert Webhooks.get_delivery_internal(processing.id) == recovered

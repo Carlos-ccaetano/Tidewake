@@ -82,3 +82,24 @@ Recovery may emit bounded logs or Telemetry for operational counts, batch durati
 ## Follow-up
 
 Implement recovery in a separate change with tests for status and threshold eligibility, oldest-first bounded batches, concurrent scanners, active-job exclusion, unchanged attempt history, cleared scheduling timestamps, atomic job insertion rollback, and the at-least-once crash window. Decide HTTP retries and backoff in a separate ADR.
+
+## Crash recovery refinement — 2026-11-04
+
+The implemented recovery originally left `pending` work stranded after a job died before claim, and an orphan `executing` job could block replacement indefinitely. Oban 2.24.2 Lifeline uses elapsed time, not proof of process death; with `max_attempts: 1` it discards an exhausted execution rather than making it available. Enabling Lifeline alone cannot restore domain progress.
+
+The following rules refine the earlier processing-only design:
+
+For this implementation, the five-minute threshold, batch size 100 and six-replacement budget are fixed in trusted code; runtime overrides for the first two remain unimplemented. This replaces the earlier requirement for configurable durations/batches until an operational need justifies those options. Request/job inputs cannot override them.
+
+- Lifeline runs every minute and rescues executions older than five minutes. Delivery and maintenance executions have two-minute worker timeouts. A paused node or uncertain HTTP completion still requires domain fencing; a timeout is not proof of external non-delivery.
+- Every minute, maintenance selects at most 100 old `pending` or `processing` deliveries without equivalent incomplete work. Active jobs are excluded **before** the limit, using the same JSON containment identities as Oban uniqueness. Selection and reconciliation hold delivery locks with `FOR UPDATE SKIP LOCKED`; 100 active jobs or locked rows cannot hide later eligible deliveries. The selected batch commits atomically, including replacement jobs; persistence failure rolls it back.
+- An internal `recovery_count`, initially zero, counts replacements within the current retry cycle and fences execution generations. Each replacement increments it transactionally. Recovered jobs carry it alongside the existing lifetime/cycle identity. Initial generation-zero jobs keep their existing four fields. Legacy one/two-field jobs mean cycle zero, generation zero, and cannot enter a later manual cycle or recovered generation.
+- The processor retains the claimed delivery snapshot. Finalization and automatic retry recheck its lifetime attempt count, retry cycle, cycle attempt count and recovery generation under the delivery lock. A delayed prior execution cannot persist an outcome into a newer claim, even when both executions represent the same unpersisted HTTP attempt.
+- Replacement preserves all HTTP attempt counters and creates no `Attempt`. Abandoned processing clears its transient schedule; pending work preserves any future due time and receives a scheduled replacement. No Oban job or historical attempt is deleted.
+- At most six technical replacements are allowed **per cycle**, cumulatively across HTTP attempts. If that budget is exhausted and work is abandoned again, reconciliation marks the delivery `failed`, with a completion timestamp and no new job or invented HTTP result. This technical terminal state can therefore have no recorded HTTP attempt. Its committed count is reported as `exhausted_count`, separately from `recovered_count`.
+- Only an eligible authorized manual retry opens a new cycle and resets the technical budget. The existing maximum of three manual cycles and six persisted HTTP outcomes per cycle is unchanged. This prevents endless technical rescheduling without consuming fictitious HTTP attempts.
+- Maintenance uniqueness excludes `executing`: an orphan cannot block the next Cron insertion. Available/scheduled/retryable maintenance remains deduplicated. Concurrent maintenance is safe through delivery locks and transactional generations; Lifeline separately discards old exhausted maintenance executions.
+
+The additive migration defaults existing deliveries to generation zero and retains all rows. Roll out the schema before the new code; coordinate worker versions before enabling generation-bearing replacements, because old workers do not understand the extra job field. No production rollout is claimed here.
+
+Recovery remains **at least once**: a receiver may accept a request whose sender is interrupted before outcome persistence. Reconciliation can send it again. The generation fence prevents duplicate domain transitions, not duplicate network delivery. Tests use independent PostgreSQL connections, controlled process/HTTP barriers, real Oban fetch/rescue, a restarted isolated Oban supervisor and loopback HTTP; no time-based sleeps or external destinations are used.

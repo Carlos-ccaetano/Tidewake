@@ -85,13 +85,15 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
                  "delivery_id" => first.id,
                  "attempt_number" => 3,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 3
+                 "cycle_attempt_number" => 3,
+                 "recovery_count" => 1
                },
                %{
                  "delivery_id" => second.id,
                  "attempt_number" => 1,
                  "retry_cycle" => 0,
-                 "cycle_attempt_number" => 1
+                 "cycle_attempt_number" => 1,
+                 "recovery_count" => 1
                }
              ]
 
@@ -100,7 +102,7 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     end)
   end
 
-  test "ignores an active-job race without duplication and continues the batch" do
+  test "excludes active jobs before selecting the recovery batch" do
     stale_at = DateTime.add(DateTime.utc_now(), -360, :second)
     attach_telemetry()
 
@@ -139,7 +141,8 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
                    "delivery_id" => recoverable.id,
                    "attempt_number" => 1,
                    "retry_cycle" => 0,
-                   "cycle_attempt_number" => 1
+                   "cycle_attempt_number" => 1,
+                   "recovery_count" => 1
                  })
              ) == 1
 
@@ -150,7 +153,7 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     assert_receive {:telemetry_event, @recovery_event,
                     %{
                       recovered_count: 1,
-                      skipped_count: 1,
+                      skipped_count: 0,
                       error_count: 0,
                       duration_ms: duration_ms
                     } = measurements, metadata}
@@ -159,7 +162,7 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
     assert metadata == %{}
 
     assert Map.keys(measurements) |> Enum.sort() ==
-             [:duration_ms, :error_count, :recovered_count, :skipped_count]
+             [:duration_ms, :error_count, :exhausted_count, :recovered_count, :skipped_count]
 
     telemetry_data = inspect({measurements, metadata})
     refute telemetry_data =~ "endpoint.invalid"
@@ -203,7 +206,8 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorkerTest do
                    "delivery_id" => &1.id,
                    "attempt_number" => 1,
                    "retry_cycle" => 0,
-                   "cycle_attempt_number" => 1
+                   "cycle_attempt_number" => 1,
+                   "recovery_count" => 1
                  }
                )
 

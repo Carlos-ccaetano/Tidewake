@@ -14,6 +14,7 @@ config :tidewake,
 config :tidewake, Oban,
   repo: Tidewake.Repo,
   queues: [default: 10, maintenance: 1],
+  lifeline: [rescue_after: {5, :minutes}],
   cron: [
     crontab: [
       {"* * * * *", Tidewake.Workers.RecoverStaleDeliveriesWorker}
