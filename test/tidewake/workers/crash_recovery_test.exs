@@ -19,6 +19,11 @@ defmodule Tidewake.Workers.CrashRecoveryTest do
       %{delivery: delivery, job: job} = scheduled_delivery("before_claim")
       orphan(job)
 
+      assert {:ok, conflicting} =
+               DeliverWebhookWorker.new_for_delivery(delivery.id, 1, 0, 1) |> Oban.insert()
+
+      assert conflicting.conflict? and conflicting.id == job.id
+
       assert {:ok, [%{state: "discarded"}]} =
                Oban.Engine.rescue_jobs(Oban.config(), Oban.Job, rescue_after: 300_000)
 
@@ -157,7 +162,11 @@ defmodule Tidewake.Workers.CrashRecoveryTest do
       assert reopened.retry_cycle == 1
       assert reopened.recovery_count == 0
       assert reopened.attempt_count == 0
-      assert {:cancel, :stale_attempt} = perform_job(DeliverWebhookWorker, initial.args)
+
+      for stale_job <- [initial, last] do
+        assert {:cancel, :stale_attempt} = perform_job(DeliverWebhookWorker, stale_job.args)
+      end
+
       assert Repo.get!(Delivery, failed.id).status == "pending"
     end)
   end
