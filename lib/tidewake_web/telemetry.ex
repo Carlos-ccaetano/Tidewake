@@ -8,6 +8,8 @@ defmodule TidewakeWeb.Telemetry do
 
   @impl true
   def init(_arg) do
+    :ok = TidewakeWeb.MetricEvents.attach()
+
     children = [
       # Telemetry poller will execute the given period measurements
       # every 10_000ms. Learn more here: https://telemetry-metrics.hexdocs.pm
@@ -114,6 +116,7 @@ defmodule TidewakeWeb.Telemetry do
       summary("vm.total_run_queue_lengths.cpu"),
       summary("vm.total_run_queue_lengths.io")
     ]
+    |> Enum.map(&TidewakeWeb.MetricEvents.metric/1)
   end
 
   defp periodic_measurements do

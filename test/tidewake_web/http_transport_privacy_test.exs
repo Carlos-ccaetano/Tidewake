@@ -46,7 +46,22 @@ defmodule TidewakeWeb.HTTPTransportPrivacyTest do
     end
   end
 
+  test "configured transport does not format request-bearing error, throw or exit terms" do
+    for kind <- ["error", "throw", "exit"] do
+      logs =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert request(:configured, "/" <> kind).status == 500
+          Logger.flush()
+        end)
+
+      refute logs =~ "f3-private-transport-marker"
+    end
+  end
+
   def init(options), do: options
+  def call(%{request_path: "/error"}, _), do: raise("f3-private-transport-marker")
+  def call(%{request_path: "/throw"}, _), do: throw("f3-private-transport-marker")
+  def call(%{request_path: "/exit"}, _), do: exit("f3-private-transport-marker")
   def call(conn, _options), do: send_resp(conn, 200, "ok")
 
   def observe([:cowboy, :request, phase], _measurements, metadata, parent) do
@@ -62,14 +77,14 @@ defmodule TidewakeWeb.HTTPTransportPrivacyTest do
     )
   end
 
-  defp request(kind) do
+  defp request(kind, path \\ "/") do
     ref = if kind == :configured, do: Module.concat(__MODULE__, "HTTP"), else: make_ref()
     options = [port: 0, ip: {127, 0, 0, 1}, ref: ref]
     spec = server_spec(kind, options)
     start_supervised!(Supervisor.child_spec(spec, id: ref))
 
     response =
-      Req.get!("http://127.0.0.1:#{:ranch.get_port(ref)}/",
+      Req.get!("http://127.0.0.1:#{:ranch.get_port(ref)}#{path}",
         retry: false,
         headers: [
           {"authorization", @authorization},
