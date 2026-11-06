@@ -125,10 +125,10 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
 
     case RetryPolicy.classify(attempt_attrs, cycle_attempt_number) do
       decision when decision in [:succeeded, :permanent_failure] ->
-        Webhooks.finalize_delivery(delivery.id, attempt_attrs)
+        Webhooks.finalize_delivery(delivery, attempt_attrs)
 
       :exhausted ->
-        delivery.id
+        delivery
         |> Webhooks.finalize_delivery(attempt_attrs)
         |> emit_retry_exhausted()
 
@@ -136,7 +136,7 @@ defmodule Tidewake.Webhooks.DeliveryProcessor do
         with {:ok, delay_seconds} <- RetryBackoff.delay_seconds(cycle_attempt_number) do
           retry_at = DateTime.add(attempt_attrs.completed_at, delay_seconds, :second)
 
-          delivery.id
+          delivery
           |> Webhooks.schedule_delivery_retry(attempt_attrs, retry_at)
           |> emit_retry_scheduled()
         end

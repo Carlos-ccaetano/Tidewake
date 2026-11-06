@@ -6,15 +6,26 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorker do
   use Oban.Worker,
     queue: :maintenance,
     max_attempts: 1,
-    unique: [fields: [:worker, :args], period: :infinity, states: :incomplete]
+    unique: [
+      fields: [:worker, :args],
+      period: :infinity,
+      states: [:available, :scheduled, :retryable]
+    ]
 
   alias Tidewake.Webhooks
 
   @stale_after_seconds 5 * 60
   @batch_size 100
-  @ignored_recovery_errors [:not_found, :invalid_transition, :not_stale, :active_job]
   @recovery_event [:tidewake, :webhooks, :delivery, :recovery]
-  @initial_measurements %{recovered_count: 0, skipped_count: 0, error_count: 0}
+  @initial_measurements %{
+    recovered_count: 0,
+    exhausted_count: 0,
+    skipped_count: 0,
+    error_count: 0
+  }
+
+  @impl Oban.Worker
+  def timeout(_job), do: :timer.minutes(2)
 
   @impl true
   def perform(%Oban.Job{args: args}) when map_size(args) == 0 do
@@ -29,29 +40,13 @@ defmodule Tidewake.Workers.RecoverStaleDeliveriesWorker do
   def perform(%Oban.Job{}), do: {:cancel, :invalid_args}
 
   defp recover_batch(stale_before) do
-    case Webhooks.list_stale_delivery_ids(stale_before, @batch_size) do
-      {:ok, delivery_ids} ->
-        recover_candidates(delivery_ids, stale_before)
+    case Webhooks.recover_stale_deliveries(stale_before, @batch_size) do
+      {:ok, counts} ->
+        {:ok, Map.merge(@initial_measurements, counts)}
 
       {:error, reason} ->
         {{:error, reason}, increment(@initial_measurements, :error_count)}
     end
-  end
-
-  defp recover_candidates(delivery_ids, stale_before) do
-    Enum.reduce_while(delivery_ids, {:ok, @initial_measurements}, fn delivery_id,
-                                                                     {:ok, measurements} ->
-      case Webhooks.recover_stale_delivery(delivery_id, stale_before) do
-        {:ok, _result} ->
-          {:cont, {:ok, increment(measurements, :recovered_count)}}
-
-        {:error, reason} when reason in @ignored_recovery_errors ->
-          {:cont, {:ok, increment(measurements, :skipped_count)}}
-
-        {:error, reason} ->
-          {:halt, {{:error, reason}, increment(measurements, :error_count)}}
-      end
-    end)
   end
 
   defp emit_recovery_telemetry({result, measurements}, started_at) do

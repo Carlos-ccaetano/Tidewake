@@ -111,7 +111,9 @@ Endpoint management and immutable event ingestion are implemented. `POST /api/ev
 
 ### Stale-delivery recovery
 
-Every minute, a maintenance worker considers at most 100 deliveries whose status is still `processing` and whose `updated_at` is at least five minutes old. Each candidate is locked and rechecked before a transaction returns it to `pending` and creates a replacement job. Recovery preserves `attempt_count` and creates no attempt because no outbound result was confirmed. The transaction rolls back if the replacement job is not inserted. This provides at-least-once semantics: a request whose result was not persisted may be sent again. Recovery Telemetry sums recovered, skipped, and controlled-error counts and summarizes batch duration without event or endpoint data.
+Every minute, maintenance reconciles at most 100 old `pending` or `processing` deliveries without equivalent incomplete work. Oban Lifeline first makes orphaned executions eligible for reconciliation by discarding exhausted one-attempt jobs after five minutes. Active work and locked rows are excluded before the batch limit. Replacements preserve HTTP counters and history, keep future due times, and increment a durable generation that rejects delayed results and stale jobs. The batch rolls back if persistence fails.
+
+Each cycle permits six technical replacements; abandoned work after that budget becomes `failed` without inventing an HTTP attempt. Only an eligible authorized manual retry opens another bounded cycle and resets this budget. Delivery and maintenance executions have two-minute timeouts. Recovery remains at least once: an externally received request whose result was not persisted may be sent again. Bounded Telemetry reports recovered, technically exhausted and error counts without event or endpoint data. See [ADR 0011's crash recovery refinement](docs/adr/0011-stale-delivery-recovery.md#crash-recovery-refinement--2026-11-04) for fencing, migration and rollout limits.
 
 ### Signed outbound delivery
 
