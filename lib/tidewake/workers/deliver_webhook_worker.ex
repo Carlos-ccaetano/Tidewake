@@ -7,6 +7,9 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
 
   alias Tidewake.Webhooks.DeliveryProcessor
 
+  @impl Oban.Worker
+  def timeout(_job), do: :timer.minutes(2)
+
   @delivery_job_unique [
     fields: [:worker, :args],
     keys: [:delivery_id, :attempt_number],
@@ -20,6 +23,33 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
     period: :infinity,
     states: :incomplete
   ]
+
+  @recovered_delivery_job_unique Keyword.update!(
+                                   @cycle_delivery_job_unique,
+                                   :keys,
+                                   &(&1 ++ [:recovery_count])
+                                 )
+
+  def new_for_delivery(id, attempt, cycle, ordinal, 0),
+    do: new_for_delivery(id, attempt, cycle, ordinal)
+
+  def new_for_delivery(id, attempt, cycle, ordinal, recovery_count)
+      when is_integer(recovery_count) and recovery_count > 0 and recovery_count <= 6 do
+    new(Map.put(job_args(id, attempt, cycle, ordinal), "recovery_count", recovery_count),
+      unique: @recovered_delivery_job_unique
+    )
+  end
+
+  def new_scheduled_for_delivery(id, attempt, cycle, ordinal, 0, at),
+    do: new_scheduled_for_delivery(id, attempt, cycle, ordinal, at)
+
+  def new_scheduled_for_delivery(id, attempt, cycle, ordinal, recovery_count, %DateTime{} = at)
+      when is_integer(recovery_count) and recovery_count > 0 and recovery_count <= 6 do
+    new(Map.put(job_args(id, attempt, cycle, ordinal), "recovery_count", recovery_count),
+      scheduled_at: at,
+      unique: @recovered_delivery_job_unique
+    )
+  end
 
   @doc """
   Builds a unique job for one persisted delivery.
@@ -85,6 +115,28 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
   end
 
   @impl true
+  def perform(%Oban.Job{args: %{"recovery_count" => recovery_count} = args} = job)
+      when is_integer(recovery_count) and recovery_count > 0 and recovery_count <= 6 and
+             map_size(args) == 5 do
+    case Map.delete(args, "recovery_count") do
+      %{
+        "delivery_id" => id,
+        "attempt_number" => attempt,
+        "retry_cycle" => cycle,
+        "cycle_attempt_number" => ordinal
+      } ->
+        process_delivery(id, %{
+          attempt_number: attempt,
+          retry_cycle: cycle,
+          cycle_attempt_number: ordinal,
+          recovery_count: recovery_count
+        })
+
+      _ ->
+        perform(%{job | args: %{}})
+    end
+  end
+
   def perform(%Oban.Job{
         args:
           %{
@@ -118,6 +170,14 @@ defmodule Tidewake.Workers.DeliverWebhookWorker do
   end
 
   def perform(%Oban.Job{}), do: {:cancel, :invalid_args}
+
+  defp process_delivery(id, attempt) when is_integer(attempt) do
+    process_delivery(id, %{
+      attempt_number: attempt,
+      retry_cycle: 0,
+      cycle_attempt_number: attempt
+    })
+  end
 
   defp process_delivery(id, expected_attempt) do
     with {:ok, adapter} <- Application.fetch_env(:tidewake, :delivery_adapter),

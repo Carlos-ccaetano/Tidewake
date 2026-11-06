@@ -365,6 +365,7 @@ defmodule Tidewake.Workers.DeliverWebhookWorkerTest do
     delivery
     |> change(
       attempt_count: 1,
+      cycle_attempt_count: 1,
       next_attempt_at: DateTime.add(DateTime.utc_now(), -1, :second)
     )
     |> Repo.update!()

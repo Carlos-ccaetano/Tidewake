@@ -51,6 +51,7 @@ defmodule TidewakeWeb.Telemetry do
       ),
       counter("tidewake.webhooks.delivery.retry_exhausted.count", tags: [:cause]),
       sum("tidewake.webhooks.delivery.recovery.recovered_count"),
+      sum("tidewake.webhooks.delivery.recovery.exhausted_count"),
       sum("tidewake.webhooks.delivery.recovery.skipped_count"),
       sum("tidewake.webhooks.delivery.recovery.error_count"),
       summary("tidewake.webhooks.delivery.recovery.duration_ms", unit: :millisecond),

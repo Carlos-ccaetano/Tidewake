@@ -20,6 +20,7 @@ defmodule TidewakeWeb.TelemetryTest do
     [:tidewake, :webhooks, :delivery, :retry_scheduled, :delay_ms],
     [:tidewake, :webhooks, :delivery, :retry_exhausted, :count],
     [:tidewake, :webhooks, :delivery, :recovery, :recovered_count],
+    [:tidewake, :webhooks, :delivery, :recovery, :exhausted_count],
     [:tidewake, :webhooks, :delivery, :recovery, :skipped_count],
     [:tidewake, :webhooks, :delivery, :recovery, :error_count],
     [:tidewake, :webhooks, :delivery, :recovery, :duration_ms]
