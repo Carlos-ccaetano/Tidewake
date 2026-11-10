@@ -70,6 +70,7 @@ jobs:
       - name: Audit pinned Cowlib revision
         run: |
           commit="$(git -C deps/cowlib rev-parse HEAD)"
+          test "$commit" = "a3b15e29b3067644bfd580246c87f7af7a90b3b8"
           curl --fail --silent --show-error --retry 3 --max-time 20 \
             --json "$(jq -n --arg commit "$commit" '{commit: $commit}')" \
             https://api.osv.dev/v1/query -o "$RUNNER_TEMP/cowlib-osv.json"
