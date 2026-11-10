@@ -73,6 +73,7 @@ jobs:
           curl --fail --silent --show-error --retry 3 --max-time 20 \
             --json "$(jq -n --arg commit "$commit" '{commit: $commit}')" \
             https://api.osv.dev/v1/query -o "$RUNNER_TEMP/cowlib-osv.json"
+          jq -r '.vulns[]? | "OSV advisory: \(.id)"' "$RUNNER_TEMP/cowlib-osv.json"
           jq -e 'type == "object" and (has("vulns") | not)' "$RUNNER_TEMP/cowlib-osv.json"
 
       - name: Check for unused locked dependencies
