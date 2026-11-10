@@ -60,6 +60,10 @@ jobs:
       - name: Install dependencies
         run: mix deps.get --check-locked
 
+      - name: Verify patched Cowboy revision
+        run: |
+          test "$(git -C deps/cowboy rev-parse HEAD)" = "3a630c07e1521abf63a1b9ea080509aa1337b60d"
+
       - name: Audit Hex dependencies
         run: mix hex.audit
 
