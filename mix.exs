@@ -71,6 +71,12 @@ defmodule Tidewake.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.3.0"},
       {:plug_cowboy, "~> 2.9"},
+      # Temporary upstream security pin for CVE-2026-115701; use Hex once fixed.
+      {:cowboy,
+       github: "ninenines/cowboy",
+       ref: "3a630c07e1521abf63a1b9ea080509aa1337b60d",
+       manager: :rebar3,
+       override: true},
       # shortcut: Hex 2.21.0 still has CVE-2026-43966; return to Hex after a fixed release.
       {:cowlib,
        github: "ninenines/cowlib",
