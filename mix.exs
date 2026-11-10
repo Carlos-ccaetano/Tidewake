@@ -79,10 +79,10 @@ defmodule Tidewake.MixProject do
        override: true},
       # Preserve the already locked Ranch 2.3.x; upstream Cowboy pins legacy Ranch 1.8.1.
       {:ranch, "~> 2.3", override: true},
-      # shortcut: Hex 2.21.0 still has CVE-2026-43966; return to Hex after a fixed release.
+      # Temporary upstream pin covers CVE-2026-43966 and CVE-2026-113431; return to Hex after a fixed release.
       {:cowlib,
        github: "ninenines/cowlib",
-       ref: "4401b858f2229abb3ea115c60924f6c77e5f8aa3",
+       ref: "a3b15e29b3067644bfd580246c87f7af7a90b3b8",
        manager: :rebar3,
        override: true},
       {:oban, "~> 2.23"},
