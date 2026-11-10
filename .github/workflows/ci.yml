@@ -57,6 +57,12 @@ jobs:
           path: deps
           key: deps-${{ runner.os }}-otp-${{ env.OTP_VERSION }}-elixir-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.exs') }}-${{ hashFiles('mix.lock') }}
 
+      - name: Diagnose patched lock (temporary; do not merge)
+        run: |
+          mix deps.get
+          git diff -- mix.lock
+          exit 1
+
       - name: Install dependencies
         run: mix deps.get --check-locked
 
